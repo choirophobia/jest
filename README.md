@@ -1,6 +1,6 @@
 # DummyJSON API Testing — Jest E2E Suite
 
-An end-to-end API test suite built with **Jest** and **axios** against the public [DummyJSON](https://dummyjson.com) API. It's a QA practice/portfolio project demonstrating CRUD testing, auth flow testing, and negative/error-case testing against a real, already-deployed REST API.
+An end-to-end API test suite built with **Jest** and **axios** against the public [DummyJSON](https://dummyjson.com) API. It's demonstrating CRUD testing, auth flow testing, and negative/error-case testing against a real, already-deployed REST API.
 
 ## Table of Contents
 - [Overview](#overview)

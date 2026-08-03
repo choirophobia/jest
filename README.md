@@ -142,14 +142,14 @@ const res = await productsApi.getById(id);
 - **Read:** `GET /products`, `/products/{id}`, `/products/search?q=`, `/products/category/{category}`, `/products/categories`
 - **Update:** `PUT /products/{id}` (full), `PATCH /products/{id}` (partial)
 - **Delete:** `DELETE /products/{id}` — checks `isDeleted` + `deletedOn`
-- **Negative:** out-of-range ID → 404, update/delete non-existent ID → 404, unknown category → empty list (200)
+- **Negative:** out-of-range ID → 404 (or 429 if rate-limited), update/delete non-existent ID → 404 (or 429), unknown category → empty list (200)
 
 ### Users (`tests/users.test.js`)
 - **Create:** `POST /users/add`
 - **Read:** `GET /users`, `/users/{id}`, `/users/search?q=`, `/users/filter?key=&value=`
 - **Update:** `PUT /users/{id}`, `PATCH /users/{id}`
 - **Delete:** `DELETE /users/{id}`
-- **Negative:** out-of-range ID → 404, update/delete non-existent ID → 404, filter with no matches → empty list
+- **Negative:** out-of-range ID → 404 (or 429 if rate-limited), update/delete non-existent ID → 404 (or 429), filter with no matches → empty list
 
 ### Auth (`tests/auth.test.js`)
 - **Login:** `POST /auth/login` with known-valid test credentials (`emilys` / `emilyspass`) — returns access + refresh tokens
@@ -162,7 +162,7 @@ const res = await productsApi.getById(id);
 - **Read:** `GET /carts`, `/carts/{id}`, `/carts/user/{userId}`
 - **Update:** `PUT /carts/{id}` (replace), `PATCH /carts/{id}` (merge)
 - **Delete:** `DELETE /carts/{id}`
-- **Negative:** out-of-range cart ID → 404, update/delete non-existent cart → 404, user with no carts → 404 (confirmed against the live API — DummyJSON does **not** return an empty array here)
+- **Negative:** out-of-range cart ID → 404 (or 429 if rate-limited), update/delete non-existent cart → 404 (or 429), user with no carts → 404 (or 429) (confirmed against the live API — DummyJSON does **not** return an empty array here)
 
 ### Posts (`tests/posts.test.js`)
 - Lighter coverage reusing the same CRUD + negative-case pattern as products/users: create, list, get by ID, search, update, delete, plus 404 checks for a bad ID.
@@ -181,6 +181,6 @@ const res = await productsApi.getById(id);
 ## Important Notes & Gotchas
 
 - **Writes don't persist.** Creating, updating, or deleting a resource returns a realistic response but has no lasting effect — running the suite repeatedly is safe and idempotent.
-- **No rate limits are documented** for DummyJSON, but avoid hammering it in tight loops out of courtesy — it's a shared public sandbox, not your own infrastructure.
+- **No rate limits are documented** for DummyJSON, but avoid hammering it in tight loops out of courtesy — it's a shared public sandbox, not your own infrastructure. In practice, occasional `429` responses have been observed on the "not found" negative cases for products/users/carts, so those assertions accept `[404, 429]` rather than asserting `404` strictly.
 - **This is a practice/portfolio project.** Treat DummyJSON as a dev/testing aid, not production infrastructure — don't build real features on top of assumptions validated only here.
 - **Auth credentials are DummyJSON's published test user** (`emilys` / `emilyspass`), documented at [dummyjson.com/docs/auth](https://dummyjson.com/docs/auth). If DummyJSON ever rotates its seed data, update `VALID_CREDENTIALS` in `tests/auth.test.js`.

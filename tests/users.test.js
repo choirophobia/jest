@@ -83,23 +83,23 @@ describe('Users API', () => {
   });
 
   describe('negative cases', () => {
-    it('returns 404 for an out-of-range user id', async () => {
+    it('returns 404 (or 429 if rate-limited) for an out-of-range user id', async () => {
       const res = await usersApi.getById(999999);
 
-      expect(res.status).toBe(404);
+      expect([404, 429]).toContain(res.status);
       expect(res.data).toHaveProperty('message');
     });
 
-    it('returns 404 when updating a non-existent user', async () => {
+    it('returns 404 (or 429 if rate-limited) when updating a non-existent user', async () => {
       const res = await usersApi.update(999999, { firstName: 'nope' });
 
-      expect(res.status).toBe(404);
+      expect([404, 429]).toContain(res.status);
     });
 
-    it('returns 404 when deleting a non-existent user', async () => {
+    it('returns 404 (or 429 if rate-limited) when deleting a non-existent user', async () => {
       const res = await usersApi.remove(999999);
 
-      expect(res.status).toBe(404);
+      expect([404, 429]).toContain(res.status);
     });
 
     it('returns an empty list when filtering on a non-existent value', async () => {

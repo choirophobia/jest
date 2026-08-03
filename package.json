@@ -1,0 +1,16 @@
+{
+  "name": "dummyjson-api-tests",
+  "version": "1.0.0",
+  "description": "End-to-end API test suite against DummyJSON using Jest and axios",
+  "private": true,
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.9"
+  }
+}

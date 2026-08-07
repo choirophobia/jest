@@ -1,0 +1,75 @@
+name: Daily Jest E2E Suite (DummyJSON)
+
+on:
+  schedule:
+    # 06:00 WIB (UTC+7) daily = 23:00 UTC the previous day
+    - cron: '0 23 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  jest-tests:
+    name: Jest E2E Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Jest tests
+        id: jest
+        run: npx jest --json --outputFile=jest-results.json
+        continue-on-error: true
+
+      - name: Parse Jest results
+        id: parse
+        if: always()
+        run: |
+          echo "passed=$(jq '.numPassedTests' jest-results.json)" >> "$GITHUB_OUTPUT"
+          echo "failed=$(jq '.numFailedTests' jest-results.json)" >> "$GITHUB_OUTPUT"
+          echo "total=$(jq '.numTotalTests' jest-results.json)" >> "$GITHUB_OUTPUT"
+          echo "success=$(jq '.success' jest-results.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ "${{ steps.parse.outputs.success }}" = "true" ]; then
+            STATUS="PASSED ✅"
+            COLOR=3066993
+          else
+            STATUS="FAILED ❌"
+            COLOR=15158332
+          fi
+
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          PAYLOAD=$(jq -n \
+            --arg status "$STATUS" \
+            --arg passed "${{ steps.parse.outputs.passed }}" \
+            --arg failed "${{ steps.parse.outputs.failed }}" \
+            --arg total "${{ steps.parse.outputs.total }}" \
+            --arg url "$RUN_URL" \
+            --argjson color "$COLOR" \
+            '{
+              embeds: [{
+                title: ("[Jest] DummyJSON E2E Suite — " + $status),
+                description: ("**Source:** Jest (`tests/*.test.js`)\n**Passed:** " + $passed + "\n**Failed:** " + $failed + "\n**Total:** " + $total),
+                url: $url,
+                color: $color
+              }]
+            }')
+
+          curl -sf -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK_URL"
+
+      - name: Fail job if tests failed
+        if: steps.parse.outputs.success != 'true'
+        run: exit 1

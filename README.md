@@ -138,11 +138,11 @@ const res = await productsApi.getById(id);
 ## Coverage by Resource
 
 ### Products (`tests/products.test.js`)
-- **Create:** `POST /products/add` — echoes title/price
-- **Read:** `GET /products`, `/products/{id}`, `/products/search?q=`, `/products/category/{category}`, `/products/categories`
-- **Update:** `PUT /products/{id}` (full), `PATCH /products/{id}` (partial)
-- **Delete:** `DELETE /products/{id}` — checks `isDeleted` + `deletedOn`
-- **Negative:** out-of-range ID → 404 (or 429 if rate-limited), update/delete non-existent ID → 404 (or 429), unknown category → empty list (200)
+- **Create:** `POST /products/add` — echoes title/price/category, checks `id` type
+- **Read:** `GET /products` (default pagination shape + item field types), `/products/{id}` (price/category/rating range/tags/reviews shape), `/products/search?q=` (results actually contain the query), `/products/category/{category}` (non-empty + every result matches), `/products/categories` (each entry's `slug`/`name`/`url` shape)
+- **Update:** `PUT /products/{id}` (full), `PATCH /products/{id}` (partial) — also asserts unmodified fields still reflect the original seed product, confirming the API merges the payload onto the existing record rather than just echoing it back
+- **Delete:** `DELETE /products/{id}` — checks `isDeleted`, `deletedOn` type, original fields preserved
+- **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body, unknown category → empty list (200)
 
 ### Users (`tests/users.test.js`)
 - **Create:** `POST /users/add` — echoes firstName/lastName/age, checks `id` type

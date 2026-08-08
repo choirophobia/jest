@@ -8,9 +8,10 @@ describe('Products API', () => {
 
       expect(res.status).toBe(201);
       expect(res.data).toHaveProperty('id');
+      expect(typeof res.data.id).toBe('number');
       expect(res.data.title).toBe(payload.title);
       expect(res.data.price).toBe(payload.price);
-      // console.log(res.data);
+      expect(res.data.category).toBe(payload.category);
     });
   });
 
@@ -23,6 +24,14 @@ describe('Products API', () => {
       expect(res.data).toHaveProperty('total');
       expect(res.data).toHaveProperty('limit');
       expect(res.data).toHaveProperty('skip');
+      expect(res.data.limit).toBe(30);
+      expect(res.data.products).toHaveLength(res.data.limit);
+      expect(res.data.total).toBeGreaterThan(res.data.products.length);
+      res.data.products.forEach((product) => {
+        expect(typeof product.id).toBe('number');
+        expect(typeof product.title).toBe('string');
+        expect(typeof product.price).toBe('number');
+      });
     });
 
     it('gets a single product by id', async () => {
@@ -31,6 +40,13 @@ describe('Products API', () => {
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
       expect(res.data).toHaveProperty('title');
+      expect(typeof res.data.price).toBe('number');
+      expect(res.data.price).toBeGreaterThan(0);
+      expect(typeof res.data.category).toBe('string');
+      expect(Array.isArray(res.data.tags)).toBe(true);
+      expect(Array.isArray(res.data.reviews)).toBe(true);
+      expect(res.data.rating).toBeGreaterThanOrEqual(0);
+      expect(res.data.rating).toBeLessThanOrEqual(5);
     });
 
     it('searches products by query', async () => {
@@ -38,6 +54,7 @@ describe('Products API', () => {
 
       expect(res.status).toBe(200);
       expect(Array.isArray(res.data.products)).toBe(true);
+      expect(res.data.products.length).toBeGreaterThan(0);
       res.data.products.forEach((product) => {
         const haystack = `${product.title} ${product.description}`.toLowerCase();
         expect(haystack).toEqual(expect.stringContaining('phone'));
@@ -49,6 +66,7 @@ describe('Products API', () => {
 
       expect(res.status).toBe(200);
       expect(Array.isArray(res.data.products)).toBe(true);
+      expect(res.data.products.length).toBeGreaterThan(0);
       res.data.products.forEach((product) => {
         expect(product.category).toBe('smartphones');
       });
@@ -60,6 +78,11 @@ describe('Products API', () => {
       expect(res.status).toBe(200);
       expect(Array.isArray(res.data)).toBe(true);
       expect(res.data.length).toBeGreaterThan(0);
+      res.data.forEach((category) => {
+        expect(typeof category.slug).toBe('string');
+        expect(typeof category.name).toBe('string');
+        expect(category.url).toEqual(expect.stringContaining(`/products/category/${category.slug}`));
+      });
     });
   });
 
@@ -71,6 +94,10 @@ describe('Products API', () => {
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
       expect(res.data.title).toBe(payload.title);
+      // Unmodified fields should still reflect the original seed product, confirming
+      // the API merges the payload onto the existing record rather than replacing it.
+      expect(res.data.category).toBe('beauty');
+      expect(res.data.brand).toBe('Essence');
     });
 
     it('partially updates a product with PATCH and echoes new fields', async () => {
@@ -80,6 +107,7 @@ describe('Products API', () => {
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
       expect(res.data.price).toBe(payload.price);
+      expect(res.data.title).toBe('Essence Mascara Lash Princess');
     });
   });
 
@@ -91,6 +119,8 @@ describe('Products API', () => {
       expect(res.data.id).toBe(1);
       expect(res.data.isDeleted).toBe(true);
       expect(res.data).toHaveProperty('deletedOn');
+      expect(typeof res.data.deletedOn).toBe('string');
+      expect(res.data.title).toBe('Essence Mascara Lash Princess');
     });
   });
 
@@ -106,12 +136,14 @@ describe('Products API', () => {
       const res = await productsApi.update(999999, { title: 'nope' });
 
       expect([404, 429]).toContain(res.status);
+      expect(res.data).toHaveProperty('message');
     });
 
     it('returns 404 (or 429 if rate-limited) when deleting a non-existent product', async () => {
       const res = await productsApi.remove(999999);
 
       expect([404, 429]).toContain(res.status);
+      expect(res.data).toHaveProperty('message');
     });
 
     it('returns an empty list for a non-existent category', async () => {

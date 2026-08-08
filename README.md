@@ -158,11 +158,11 @@ const res = await productsApi.getById(id);
 - **Negative:** wrong password (400), missing required field (400), unknown username (400)
 
 ### Carts (`tests/carts.test.js`)
-- **Create:** `POST /carts/add` — tied to a `userId`, echoes `products[]`
-- **Read:** `GET /carts`, `/carts/{id}`, `/carts/user/{userId}`
-- **Update:** `PUT /carts/{id}` (replace), `PATCH /carts/{id}` (merge)
-- **Delete:** `DELETE /carts/{id}`
-- **Negative:** out-of-range cart ID → 404 (or 429 if rate-limited), update/delete non-existent cart → 404 (or 429), user with no carts → 404 (or 429) (confirmed against the live API — DummyJSON does **not** return an empty array here)
+- **Create:** `POST /carts/add` — tied to a `userId`, echoes `products[]` (id/quantity per line item), checks `totalProducts`/`totalQuantity` match the payload
+- **Read:** `GET /carts` (default pagination shape + item field types), `/carts/{id}` (per-product id/title/price/quantity/total shape, `totalProducts` consistency), `/carts/user/{userId}` (non-empty + every result matches, `totalProducts` consistency)
+- **Update:** `PUT /carts/{id}` (`merge: false` — asserts the product list is *replaced*, not appended), `PATCH /carts/{id}` (`merge: true` — asserts the product list is *appended to* the original seed cart, not replaced)
+- **Delete:** `DELETE /carts/{id}` — checks `isDeleted`, `deletedOn` type, original `userId` preserved
+- **Negative:** out-of-range cart ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent cart → 404 (or 429) with a `message` body, user with no carts → 404 (or 429) (confirmed against the live API — DummyJSON does **not** return an empty array here)
 
 ### Posts (`tests/posts.test.js`)
 - **Create:** `POST /posts/add` — echoes title/body/userId, checks `id` type

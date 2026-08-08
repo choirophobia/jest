@@ -14,9 +14,18 @@ describe('Carts API', () => {
 
       expect(res.status).toBe(201);
       expect(res.data).toHaveProperty('id');
+      expect(typeof res.data.id).toBe('number');
       expect(res.data.userId).toBe(payload.userId);
       expect(res.data.products).toHaveLength(payload.products.length);
+      res.data.products.forEach((product, i) => {
+        expect(product.id).toBe(payload.products[i].id);
+        expect(product.quantity).toBe(payload.products[i].quantity);
+        expect(typeof product.price).toBe('number');
+        expect(typeof product.total).toBe('number');
+      });
       expect(res.data).toHaveProperty('total');
+      expect(res.data.totalProducts).toBe(payload.products.length);
+      expect(res.data.totalQuantity).toBe(3);
     });
   });
 
@@ -27,6 +36,16 @@ describe('Carts API', () => {
       expect(res.status).toBe(200);
       expect(Array.isArray(res.data.carts)).toBe(true);
       expect(res.data).toHaveProperty('total');
+      expect(res.data).toHaveProperty('limit');
+      expect(res.data).toHaveProperty('skip');
+      expect(res.data.limit).toBe(30);
+      expect(res.data.carts).toHaveLength(res.data.limit);
+      expect(res.data.total).toBeGreaterThan(res.data.carts.length);
+      res.data.carts.forEach((cart) => {
+        expect(typeof cart.id).toBe('number');
+        expect(typeof cart.userId).toBe('number');
+        expect(Array.isArray(cart.products)).toBe(true);
+      });
     });
 
     it('gets a single cart by id', async () => {
@@ -36,6 +55,16 @@ describe('Carts API', () => {
       expect(res.data.id).toBe(1);
       expect(res.data).toHaveProperty('products');
       expect(res.data).toHaveProperty('userId');
+      expect(res.data.products.length).toBeGreaterThan(0);
+      res.data.products.forEach((product) => {
+        expect(typeof product.id).toBe('number');
+        expect(typeof product.title).toBe('string');
+        expect(typeof product.price).toBe('number');
+        expect(typeof product.quantity).toBe('number');
+        expect(typeof product.total).toBe('number');
+      });
+      expect(res.data.totalProducts).toBe(res.data.products.length);
+      expect(typeof res.data.totalQuantity).toBe('number');
     });
 
     it('lists carts belonging to a specific user', async () => {
@@ -43,8 +72,10 @@ describe('Carts API', () => {
 
       expect(res.status).toBe(200);
       expect(Array.isArray(res.data.carts)).toBe(true);
+      expect(res.data.carts.length).toBeGreaterThan(0);
       res.data.carts.forEach((cart) => {
         expect(cart.userId).toBe(1);
+        expect(cart.totalProducts).toBe(cart.products.length);
       });
     });
   });
@@ -57,6 +88,12 @@ describe('Carts API', () => {
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
       expect(res.data).toHaveProperty('products');
+      // merge: false replaces the cart's products outright, so only the
+      // requested product should remain.
+      expect(res.data.products).toHaveLength(1);
+      expect(res.data.products[0].id).toBe(1);
+      expect(res.data.products[0].quantity).toBe(5);
+      expect(res.data.totalProducts).toBe(1);
     });
 
     it('partially updates a cart with PATCH and merges products', async () => {
@@ -66,6 +103,13 @@ describe('Carts API', () => {
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
       expect(res.data).toHaveProperty('products');
+      // merge: true adds to the original seed cart's products rather than
+      // replacing them, so the result should contain more than just the payload.
+      expect(res.data.products.length).toBeGreaterThan(payload.products.length);
+      expect(res.data.products).toContainEqual(
+        expect.objectContaining({ id: 3, quantity: 1 }),
+      );
+      expect(res.data.totalProducts).toBe(res.data.products.length);
     });
   });
 
@@ -77,6 +121,8 @@ describe('Carts API', () => {
       expect(res.data.id).toBe(1);
       expect(res.data.isDeleted).toBe(true);
       expect(res.data).toHaveProperty('deletedOn');
+      expect(typeof res.data.deletedOn).toBe('string');
+      expect(res.data.userId).toBe(1);
     });
   });
 
@@ -92,12 +138,14 @@ describe('Carts API', () => {
       const res = await cartsApi.update(999999, { products: [] });
 
       expect([404, 429]).toContain(res.status);
+      expect(res.data).toHaveProperty('message');
     });
 
     it('returns 404 (or 429 if rate-limited) when deleting a non-existent cart', async () => {
       const res = await cartsApi.remove(999999);
 
       expect([404, 429]).toContain(res.status);
+      expect(res.data).toHaveProperty('message');
     });
 
     it('returns 404 (or 429 if rate-limited) for a user id with no carts', async () => {

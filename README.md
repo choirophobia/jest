@@ -152,10 +152,10 @@ const res = await productsApi.getById(id);
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body, filter with no matches → empty list
 
 ### Auth (`tests/auth.test.js`)
-- **Login:** `POST /auth/login` with known-valid test credentials (`emilys` / `emilyspass`) — returns access + refresh tokens
-- **Protected route:** `GET /auth/me` with a valid Bearer token (200), no token (401), invalid token (401)
-- **Refresh:** `POST /auth/refresh` with a valid refresh token (200), missing token (401)
-- **Negative:** wrong password (400), missing required field (400), unknown username (400)
+- **Login:** `POST /auth/login` with known-valid test credentials (`emilys` / `emilyspass`) — returns access + refresh tokens matching JWT shape (`header.payload.signature`), echoed `id`/`email`/`firstName`/`lastName`, and confirms `password` is never present in the response
+- **Protected route:** `GET /auth/me` with a valid Bearer token (200, checks `id`/`email`/`address`/`company`/`role` shape), no token (401), invalid token (401) — both rejections check the `message` body is a string
+- **Refresh:** `POST /auth/refresh` with a valid refresh token (200, new tokens match JWT shape), missing token (401 with a `message` body)
+- **Negative:** wrong password (400), missing required field (400), unknown username (400) — all three check a `message` body is present and that no `accessToken` leaks into an error response
 
 ### Carts (`tests/carts.test.js`)
 - **Create:** `POST /carts/add` — tied to a `userId`, echoes `products[]` (id/quantity per line item), checks `totalProducts`/`totalQuantity` match the payload

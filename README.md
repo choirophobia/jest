@@ -165,7 +165,11 @@ const res = await productsApi.getById(id);
 - **Negative:** out-of-range cart ID → 404 (or 429 if rate-limited), update/delete non-existent cart → 404 (or 429), user with no carts → 404 (or 429) (confirmed against the live API — DummyJSON does **not** return an empty array here)
 
 ### Posts (`tests/posts.test.js`)
-- Lighter coverage reusing the same CRUD + negative-case pattern as products/users: create, list, get by ID, search, update, delete, plus 404 checks for a bad ID.
+- **Create:** `POST /posts/add` — echoes title/body/userId, checks `id` type
+- **Read:** `GET /posts` (default pagination shape + item field types), `/posts/{id}` (body/tags/userId/views/reactions shape), `/posts/search?q=` (results actually contain the query, matched across title *and* body)
+- **Update:** `PUT /posts/{id}` — also asserts unmodified fields (`userId`, `tags`) still reflect the original seed post, confirming the API merges the payload onto the existing record rather than just echoing it back
+- **Delete:** `DELETE /posts/{id}` — checks `isDeleted`, `deletedOn` type, original title preserved
+- **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body
 
 ## Conventions
 

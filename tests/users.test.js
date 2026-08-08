@@ -8,8 +8,10 @@ describe('Users API', () => {
 
       expect(res.status).toBe(201);
       expect(res.data).toHaveProperty('id');
+      expect(typeof res.data.id).toBe('number');
       expect(res.data.firstName).toBe(payload.firstName);
       expect(res.data.lastName).toBe(payload.lastName);
+      expect(res.data.age).toBe(payload.age);
     });
   });
 
@@ -22,6 +24,13 @@ describe('Users API', () => {
       expect(res.data).toHaveProperty('total');
       expect(res.data).toHaveProperty('limit');
       expect(res.data).toHaveProperty('skip');
+      expect(res.data.limit).toBe(30);
+      expect(res.data.users).toHaveLength(res.data.limit);
+      expect(res.data.total).toBeGreaterThan(res.data.users.length);
+      res.data.users.forEach((user) => {
+        expect(typeof user.id).toBe('number');
+        expect(typeof user.email).toBe('string');
+      });
     });
 
     it('gets a single user by id', async () => {
@@ -31,6 +40,12 @@ describe('Users API', () => {
       expect(res.data.id).toBe(1);
       expect(res.data).toHaveProperty('firstName');
       expect(res.data).toHaveProperty('email');
+      expect(res.data.email).toEqual(expect.stringMatching(/^\S+@\S+\.\S+$/));
+      expect(typeof res.data.age).toBe('number');
+      expect(res.data).toHaveProperty('username');
+      expect(res.data).toHaveProperty('address');
+      expect(res.data).toHaveProperty('company');
+      expect(['male', 'female']).toContain(res.data.gender);
     });
 
     it('searches users by query', async () => {
@@ -38,6 +53,12 @@ describe('Users API', () => {
 
       expect(res.status).toBe(200);
       expect(Array.isArray(res.data.users)).toBe(true);
+      expect(res.data).toHaveProperty('total');
+      expect(res.data.users.length).toBeGreaterThan(0);
+      res.data.users.forEach((user) => {
+        const haystack = `${user.firstName} ${user.lastName} ${user.email}`.toLowerCase();
+        expect(haystack).toEqual(expect.stringContaining('a'));
+      });
     });
 
     it('filters users by key/value', async () => {
@@ -45,6 +66,7 @@ describe('Users API', () => {
 
       expect(res.status).toBe(200);
       expect(Array.isArray(res.data.users)).toBe(true);
+      expect(res.data.users.length).toBeGreaterThan(0);
       res.data.users.forEach((user) => {
         expect(user.hair.color).toBe('Brown');
       });
@@ -59,6 +81,10 @@ describe('Users API', () => {
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
       expect(res.data.firstName).toBe(payload.firstName);
+      // Unmodified fields should still reflect the original seed user, confirming
+      // the API merges the payload onto the existing record rather than replacing it.
+      expect(res.data.lastName).toBe('Johnson');
+      expect(res.data.email).toBe('emily.johnson@x.dummyjson.com');
     });
 
     it('partially updates a user with PATCH and echoes new fields', async () => {
@@ -68,6 +94,7 @@ describe('Users API', () => {
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
       expect(res.data.age).toBe(payload.age);
+      expect(res.data.firstName).toBe('Emily');
     });
   });
 
@@ -79,6 +106,8 @@ describe('Users API', () => {
       expect(res.data.id).toBe(1);
       expect(res.data.isDeleted).toBe(true);
       expect(res.data).toHaveProperty('deletedOn');
+      expect(typeof res.data.deletedOn).toBe('string');
+      expect(res.data.firstName).toBe('Emily');
     });
   });
 
@@ -94,12 +123,14 @@ describe('Users API', () => {
       const res = await usersApi.update(999999, { firstName: 'nope' });
 
       expect([404, 429]).toContain(res.status);
+      expect(res.data).toHaveProperty('message');
     });
 
     it('returns 404 (or 429 if rate-limited) when deleting a non-existent user', async () => {
       const res = await usersApi.remove(999999);
 
       expect([404, 429]).toContain(res.status);
+      expect(res.data).toHaveProperty('message');
     });
 
     it('returns an empty list when filtering on a non-existent value', async () => {

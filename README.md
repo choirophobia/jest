@@ -145,11 +145,11 @@ const res = await productsApi.getById(id);
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited), update/delete non-existent ID → 404 (or 429), unknown category → empty list (200)
 
 ### Users (`tests/users.test.js`)
-- **Create:** `POST /users/add`
-- **Read:** `GET /users`, `/users/{id}`, `/users/search?q=`, `/users/filter?key=&value=`
-- **Update:** `PUT /users/{id}`, `PATCH /users/{id}`
-- **Delete:** `DELETE /users/{id}`
-- **Negative:** out-of-range ID → 404 (or 429 if rate-limited), update/delete non-existent ID → 404 (or 429), filter with no matches → empty list
+- **Create:** `POST /users/add` — echoes firstName/lastName/age, checks `id` type
+- **Read:** `GET /users` (default pagination shape + item field types), `/users/{id}` (email format, address/company/username presence), `/users/search?q=` (results actually contain the query), `/users/filter?key=&value=` (non-empty + every result matches)
+- **Update:** `PUT /users/{id}`, `PATCH /users/{id}` — also asserts unmodified fields still reflect the original seed user, confirming the API merges the payload onto the existing record rather than just echoing it back
+- **Delete:** `DELETE /users/{id}` — checks `isDeleted`, `deletedOn` type, original fields preserved
+- **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body, filter with no matches → empty list
 
 ### Auth (`tests/auth.test.js`)
 - **Login:** `POST /auth/login` with known-valid test credentials (`emilys` / `emilyspass`) — returns access + refresh tokens

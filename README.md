@@ -39,7 +39,9 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── carts.test.js      # CRUD tied to a user ID
 │   ├── posts.test.js      # Lighter CRUD coverage
 │   ├── comments.test.js   # CRUD + lookup by post ID
-│   └── recipes.test.js    # CRUD + search/tags/meal-type filters
+│   ├── recipes.test.js    # CRUD + search/tags/meal-type filters
+│   ├── todos.test.js      # CRUD + random todo
+│   └── quotes.test.js     # Read-only + random quote (no write endpoints)
 ├── helpers/
 │   ├── apiClient.js       # Shared axios instance (base URL + status handling)
 │   ├── productsApi.js     # Service object — wraps every /products endpoint
@@ -48,7 +50,9 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── cartsApi.js        # Service object — wraps every /carts endpoint
 │   ├── postsApi.js        # Service object — wraps every /posts endpoint
 │   ├── commentsApi.js     # Service object — wraps every /comments endpoint
-│   └── recipesApi.js      # Service object — wraps every /recipes endpoint
+│   ├── recipesApi.js      # Service object — wraps every /recipes endpoint
+│   ├── todosApi.js        # Service object — wraps every /todos endpoint
+│   └── quotesApi.js       # Service object — wraps every /quotes endpoint
 ├── package.json
 ├── CLAUDE.md              # Project spec / working notes for AI-assisted development
 └── README.md              # You are here
@@ -75,7 +79,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **7 suites / 76 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **9 suites / 89 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
 
 ## How the Suite Is Organized
 
@@ -101,7 +105,7 @@ This suite uses the **Service Object Model** — the API-testing equivalent of t
 
 **In POM**, you don't put CSS selectors and clicks directly in your test files — you wrap them in a `LoginPage` class with methods like `login(username, password)`. The test reads like a scenario; the page's mechanics live in one place.
 
-**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js`, `helpers/commentsApi.js`, `helpers/recipesApi.js` — that wraps its raw HTTP calls behind readable methods:
+**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js`, `helpers/commentsApi.js`, `helpers/recipesApi.js`, `helpers/todosApi.js`, `helpers/quotesApi.js` — that wraps its raw HTTP calls behind readable methods:
 
 ```js
 // helpers/productsApi.js
@@ -189,9 +193,21 @@ const res = await productsApi.getById(id);
 - **Delete:** `DELETE /recipes/{id}` — checks `isDeleted`, `deletedOn` type, original name preserved
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body, unknown tag → empty list (200)
 
+### Todos (`tests/todos.test.js`)
+- **Create:** `POST /todos/add` — echoes todo/completed/userId, checks `id` type
+- **Read:** `GET /todos` (default pagination shape + item field types), `/todos/{id}` (todo/completed/userId shape), `/todos/random` (same shape, no id assumed)
+- **Update:** `PUT /todos/{id}` — also asserts unmodified fields (`todo`, `userId`) still reflect the original seed todo, confirming the API merges the payload onto the existing record rather than just echoing it back
+- **Delete:** `DELETE /todos/{id}` — checks `isDeleted`, `deletedOn` type, original `todo` text preserved
+- **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body
+
+### Quotes (`tests/quotes.test.js`)
+- **Read-only resource** — DummyJSON's docs list no add/update/delete endpoint for `/quotes`, so this file has no Create/Update/Delete blocks (like `auth.test.js`, it departs from the standard CRUD shape by design, not by omission)
+- **Read:** `GET /quotes` (default pagination shape + item field types), `/quotes/{id}` (quote/author shape), `/quotes/random` (same shape, no id assumed)
+- **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body
+
 ## Conventions
 
-- **One file per resource**, grouped into `Create` / `Read` / `Update` / `Delete` / `negative cases` describe blocks.
+- **One file per resource**, grouped into `Create` / `Read` / `Update` / `Delete` / `negative cases` describe blocks — except read-only resources (`quotes`), which only have `Read` / `negative cases`.
 - **Tests call service objects, never `apiClient` directly.** Adding a new endpoint call means adding a method to the resource's service object in `helpers/`, not inlining a new `apiClient.get/post/...` call inside a test.
 - **No state reset between tests.** `beforeAll`/`beforeEach` are only used for shared setup (e.g. obtaining an auth token in `auth.test.js`), never to "reset" server state — DummyJSON doesn't persist writes, so there's nothing to reset.
 - **Assertions focus on:**

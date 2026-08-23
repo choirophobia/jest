@@ -38,7 +38,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── auth.test.js       # Login, protected route, token refresh
 │   ├── carts.test.js      # CRUD tied to a user ID
 │   ├── posts.test.js      # Lighter CRUD coverage
-│   └── comments.test.js   # CRUD + lookup by post ID
+│   ├── comments.test.js   # CRUD + lookup by post ID
+│   └── recipes.test.js    # CRUD + search/tags/meal-type filters
 ├── helpers/
 │   ├── apiClient.js       # Shared axios instance (base URL + status handling)
 │   ├── productsApi.js     # Service object — wraps every /products endpoint
@@ -46,7 +47,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── authApi.js         # Service object — wraps every /auth endpoint
 │   ├── cartsApi.js        # Service object — wraps every /carts endpoint
 │   ├── postsApi.js        # Service object — wraps every /posts endpoint
-│   └── commentsApi.js     # Service object — wraps every /comments endpoint
+│   ├── commentsApi.js     # Service object — wraps every /comments endpoint
+│   └── recipesApi.js      # Service object — wraps every /recipes endpoint
 ├── package.json
 ├── CLAUDE.md              # Project spec / working notes for AI-assisted development
 └── README.md              # You are here
@@ -73,7 +75,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **6 suites / 63 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **7 suites / 76 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
 
 ## How the Suite Is Organized
 
@@ -99,7 +101,7 @@ This suite uses the **Service Object Model** — the API-testing equivalent of t
 
 **In POM**, you don't put CSS selectors and clicks directly in your test files — you wrap them in a `LoginPage` class with methods like `login(username, password)`. The test reads like a scenario; the page's mechanics live in one place.
 
-**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js`, `helpers/commentsApi.js` — that wraps its raw HTTP calls behind readable methods:
+**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js`, `helpers/commentsApi.js`, `helpers/recipesApi.js` — that wraps its raw HTTP calls behind readable methods:
 
 ```js
 // helpers/productsApi.js
@@ -180,6 +182,13 @@ const res = await productsApi.getById(id);
 - **Delete:** `DELETE /comments/{id}` — checks `isDeleted`, `deletedOn` type, original body preserved
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body
 
+### Recipes (`tests/recipes.test.js`)
+- **Create:** `POST /recipes/add` — echoes name/ingredients/difficulty/userId, checks `id` type. **Note:** unlike most other resources, this endpoint returns `200` on success, not `201` (confirmed against the live API)
+- **Read:** `GET /recipes` (default pagination shape + item field types), `/recipes/{id}` (prep/cook time, servings, rating range, tags/mealType shape), `/recipes/search?q=` (results actually contain the query), `/recipes/tags` (non-empty flat list), `/recipes/tag/{tag}` (non-empty + every result's `tags` includes it), `/recipes/meal-type/{type}` (non-empty + every result's `mealType` includes it)
+- **Update:** `PUT /recipes/{id}` — also asserts unmodified fields (`cuisine`, `ingredients`) still reflect the original seed recipe, confirming the API merges the payload onto the existing record rather than just echoing it back
+- **Delete:** `DELETE /recipes/{id}` — checks `isDeleted`, `deletedOn` type, original name preserved
+- **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body, unknown tag → empty list (200)
+
 ## Conventions
 
 - **One file per resource**, grouped into `Create` / `Read` / `Update` / `Delete` / `negative cases` describe blocks.
@@ -195,5 +204,6 @@ const res = await productsApi.getById(id);
 
 - **Writes don't persist.** Creating, updating, or deleting a resource returns a realistic response but has no lasting effect — running the suite repeatedly is safe and idempotent.
 - **No rate limits are documented** for DummyJSON, but avoid hammering it in tight loops out of courtesy — it's a shared public sandbox, not your own infrastructure. In practice, occasional `429` responses have been observed on the "not found" negative cases for products/users/carts, so those assertions accept `[404, 429]` rather than asserting `404` strictly.
+- **Create status codes aren't consistent across resources.** Most `POST .../add` endpoints return `201`, but `POST /recipes/add` returns `200` — verified directly against the live API before writing the assertion. Don't assume `201` when adding a new resource; check the real response first.
 - **This is a practice/portfolio project.** Treat DummyJSON as a dev/testing aid, not production infrastructure — don't build real features on top of assumptions validated only here.
 - **Auth credentials are DummyJSON's published test user** (`emilys` / `emilyspass`), documented at [dummyjson.com/docs/auth](https://dummyjson.com/docs/auth). If DummyJSON ever rotates its seed data, update `VALID_CREDENTIALS` in `tests/auth.test.js`.

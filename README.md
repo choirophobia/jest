@@ -37,14 +37,16 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── users.test.js      # Full CRUD + search/filter + negative cases
 │   ├── auth.test.js       # Login, protected route, token refresh
 │   ├── carts.test.js      # CRUD tied to a user ID
-│   └── posts.test.js      # Lighter CRUD coverage
+│   ├── posts.test.js      # Lighter CRUD coverage
+│   └── comments.test.js   # CRUD + lookup by post ID
 ├── helpers/
 │   ├── apiClient.js       # Shared axios instance (base URL + status handling)
 │   ├── productsApi.js     # Service object — wraps every /products endpoint
 │   ├── usersApi.js        # Service object — wraps every /users endpoint
 │   ├── authApi.js         # Service object — wraps every /auth endpoint
 │   ├── cartsApi.js        # Service object — wraps every /carts endpoint
-│   └── postsApi.js        # Service object — wraps every /posts endpoint
+│   ├── postsApi.js        # Service object — wraps every /posts endpoint
+│   └── commentsApi.js     # Service object — wraps every /comments endpoint
 ├── package.json
 ├── CLAUDE.md              # Project spec / working notes for AI-assisted development
 └── README.md              # You are here
@@ -71,7 +73,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **5 suites / 54 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **6 suites / 63 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
 
 ## How the Suite Is Organized
 
@@ -97,7 +99,7 @@ This suite uses the **Service Object Model** — the API-testing equivalent of t
 
 **In POM**, you don't put CSS selectors and clicks directly in your test files — you wrap them in a `LoginPage` class with methods like `login(username, password)`. The test reads like a scenario; the page's mechanics live in one place.
 
-**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js` — that wraps its raw HTTP calls behind readable methods:
+**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js`, `helpers/commentsApi.js` — that wraps its raw HTTP calls behind readable methods:
 
 ```js
 // helpers/productsApi.js
@@ -169,6 +171,13 @@ const res = await productsApi.getById(id);
 - **Read:** `GET /posts` (default pagination shape + item field types), `/posts/{id}` (body/tags/userId/views/reactions shape), `/posts/search?q=` (results actually contain the query, matched across title *and* body)
 - **Update:** `PUT /posts/{id}` — also asserts unmodified fields (`userId`, `tags`) still reflect the original seed post, confirming the API merges the payload onto the existing record rather than just echoing it back
 - **Delete:** `DELETE /posts/{id}` — checks `isDeleted`, `deletedOn` type, original title preserved
+- **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body
+
+### Comments (`tests/comments.test.js`)
+- **Create:** `POST /comments/add` — echoes body/postId, checks nested `user.id` matches the payload's `userId`, checks `id` type
+- **Read:** `GET /comments` (default pagination shape + item field types, including nested `user`), `/comments/{id}` (body/postId/likes/`user.username` shape), `/comments/post/{postId}` (non-empty + every result's `postId` matches)
+- **Update:** `PUT /comments/{id}` — also asserts unmodified fields (`postId`, `user`) still reflect the original seed comment, confirming the API merges the payload onto the existing record rather than just echoing it back
+- **Delete:** `DELETE /comments/{id}` — checks `isDeleted`, `deletedOn` type, original body preserved
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body
 
 ## Conventions

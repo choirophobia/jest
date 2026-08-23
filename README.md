@@ -11,6 +11,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [How the Suite Is Organized](#how-the-suite-is-organized)
 - [Service Object Model (SOM)](#service-object-model-som)
 - [Coverage by Resource](#coverage-by-resource)
+- [Understanding Mock HTTP](#understanding-mock-http)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
 
@@ -41,7 +42,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── comments.test.js   # CRUD + lookup by post ID
 │   ├── recipes.test.js    # CRUD + search/tags/meal-type filters
 │   ├── todos.test.js      # CRUD + random todo
-│   └── quotes.test.js     # Read-only + random quote (no write endpoints)
+│   ├── quotes.test.js     # Read-only + random quote (no write endpoints)
+│   └── mockHttp.test.js   # Simulated status codes via /http/{code} (utility, not CRUD)
 ├── helpers/
 │   ├── apiClient.js       # Shared axios instance (base URL + status handling)
 │   ├── productsApi.js     # Service object — wraps every /products endpoint
@@ -52,7 +54,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── commentsApi.js     # Service object — wraps every /comments endpoint
 │   ├── recipesApi.js      # Service object — wraps every /recipes endpoint
 │   ├── todosApi.js        # Service object — wraps every /todos endpoint
-│   └── quotesApi.js       # Service object — wraps every /quotes endpoint
+│   ├── quotesApi.js       # Service object — wraps every /quotes endpoint
+│   └── mockHttpApi.js     # Service object — wraps every /http/{code} verb
 ├── package.json
 ├── CLAUDE.md              # Project spec / working notes for AI-assisted development
 └── README.md              # You are here
@@ -79,7 +82,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **9 suites / 89 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **10 suites / 100 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
 
 ## How the Suite Is Organized
 
@@ -105,7 +108,7 @@ This suite uses the **Service Object Model** — the API-testing equivalent of t
 
 **In POM**, you don't put CSS selectors and clicks directly in your test files — you wrap them in a `LoginPage` class with methods like `login(username, password)`. The test reads like a scenario; the page's mechanics live in one place.
 
-**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js`, `helpers/commentsApi.js`, `helpers/recipesApi.js`, `helpers/todosApi.js`, `helpers/quotesApi.js` — that wraps its raw HTTP calls behind readable methods:
+**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js`, `helpers/commentsApi.js`, `helpers/recipesApi.js`, `helpers/todosApi.js`, `helpers/quotesApi.js`, `helpers/mockHttpApi.js` — that wraps its raw HTTP calls behind readable methods:
 
 ```js
 // helpers/productsApi.js
@@ -205,9 +208,45 @@ const res = await productsApi.getById(id);
 - **Read:** `GET /quotes` (default pagination shape + item field types), `/quotes/{id}` (quote/author shape), `/quotes/random` (same shape, no id assumed)
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body
 
+### Mock HTTP (`tests/mockHttp.test.js`)
+- **Utility resource, not a data resource** — see [Understanding Mock HTTP](#understanding-mock-http) below for what this endpoint is and why it's tested at all
+- **Success codes:** `GET /http/200` → `{ status: 200, message: "OK" }`; `GET /http/201` → `"Created"`; `GET /http/204` → empty body
+- **Redirect / error codes:** `GET /http/301`, `/http/404`, `/http/429`, `/http/500` — each returns its standard reason phrase as the `message`
+- **Custom messages:** `GET /http/200/All_good` and `GET /http/400/Missing_field_email` — confirms the path segment after the code overrides the default message
+- **Method-agnostic:** `GET`, `POST`, `PUT`, `PATCH`, `DELETE` all honor the same mocked code — confirmed by firing all five verbs at `/http/200` in parallel
+- **Negative:** `GET /http/999` (an unsupported/invalid status code) → the *mock endpoint itself* returns `500` with a `message` explaining the code isn't supported — a good reminder that even a "give me any status you want" endpoint has its own failure mode
+
+## Understanding Mock HTTP
+
+If this is your first time seeing the term, here's the mental model.
+
+**What "mocking" means, generally.** A mock is a fake stand-in for something real — used so you can control its behavior precisely, instead of depending on the real thing actually doing that. In testing, you mock things that are slow, external, non-deterministic, or hard to force into a specific state on demand.
+
+**What DummyJSON's Mock HTTP endpoint specifically does.** `GET /http/{code}` (or `POST`/`PUT`/`PATCH`/`DELETE` — the verb doesn't matter) makes the server *deliberately* respond with whatever HTTP status code you ask for in the URL:
+
+```bash
+curl https://dummyjson.com/http/200   # → HTTP 200 {"status":200,"message":"OK"}
+curl https://dummyjson.com/http/404   # → HTTP 404 {"status":404,"message":"Not Found",...}
+curl https://dummyjson.com/http/500   # → HTTP 500 {"status":500,"message":"Internal Server Error",...}
+```
+
+You can even override the message: `GET /http/404/Missing_field_email` returns a 404 whose `message` is `"Missing_field_email"` instead of the default `"Not Found"`.
+
+**Why this is useful — the actual problem it solves.** Every other endpoint in this suite (`/products`, `/carts`, `/comments`, …) only returns the status codes DummyJSON's real logic happens to produce: `200` on a normal read, `404` on a bad ID, and so on. You have **no way to force a `500`, a `429`, or a `503` from those endpoints on demand** — the real backend simply doesn't fail that way when you ask nicely. `/http/{code}` sidesteps that: it's a dedicated endpoint whose entire job is "return exactly the status I asked for," so you can exercise response handling for codes the rest of the API will never naturally produce in a test run.
+
+**When you'd actually reach for something like this (the urgency/importance angle):**
+- **Testing error-handling code paths that are otherwise untestable.** If your app has a "show a friendly message on 500" branch, or a "retry on 429/503" policy, or a "redirect on 301" handler — you can't reliably trigger those from a well-behaved API. A mock endpoint lets you prove that code path actually works, not just that it compiles.
+- **CI/CD pipelines that need deterministic failures.** A flaky "sometimes the real API 500s" test is worse than no test. Mocking a guaranteed 500 gives you a repeatable, non-flaky assertion.
+- **Contract/negative testing without touching real state.** You get to test "what does my client do with a 429" without actually needing to trigger real rate-limiting (which would also throttle every *other* test running against the same API).
+- **Frontend/client development before a backend endpoint exists or is reachable.** Point your app at a mock and build the UI for every status code it should eventually handle.
+
+**When you *don't* need it.** If the real endpoint already produces the status you're testing naturally — e.g. `GET /products/999999` really does return `404` — just test that directly, as the rest of this suite does. Reach for `/http/{code}` specifically for codes the real API can't be coaxed into returning on demand (`500`, `503`, `429`, arbitrary `3xx`, etc.), or when you want a guaranteed, flake-free status for a CI assertion.
+
+**A naming collision worth flagging.** This README's [Overview](#overview) says the suite does "no mocking" — that refers to **not mocking axios/the network layer** (every test still makes a real HTTP call; nothing is faked at the JavaScript level). DummyJSON's Mock HTTP feature is a completely different thing: **the *server itself*, as a real feature, agrees to fake its own response code for you.** The request is 100% real; only the status code is synthetic. Both statements are true at once — worth keeping straight since "mock" gets used both ways in this project.
+
 ## Conventions
 
-- **One file per resource**, grouped into `Create` / `Read` / `Update` / `Delete` / `negative cases` describe blocks — except read-only resources (`quotes`), which only have `Read` / `negative cases`.
+- **One file per resource**, grouped into `Create` / `Read` / `Update` / `Delete` / `negative cases` describe blocks — except read-only resources (`quotes`), which only have `Read` / `negative cases`, and the `mockHttp` utility file, which is grouped by scenario instead of CRUD since it doesn't model a data entity.
 - **Tests call service objects, never `apiClient` directly.** Adding a new endpoint call means adding a method to the resource's service object in `helpers/`, not inlining a new `apiClient.get/post/...` call inside a test.
 - **No state reset between tests.** `beforeAll`/`beforeEach` are only used for shared setup (e.g. obtaining an auth token in `auth.test.js`), never to "reset" server state — DummyJSON doesn't persist writes, so there's nothing to reset.
 - **Assertions focus on:**

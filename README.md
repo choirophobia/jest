@@ -12,6 +12,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Service Object Model (SOM)](#service-object-model-som)
 - [Coverage by Resource](#coverage-by-resource)
 - [Understanding Mock HTTP](#understanding-mock-http)
+- [Understanding the Tools APIs](#understanding-the-tools-apis)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
 
@@ -43,7 +44,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── recipes.test.js    # CRUD + search/tags/meal-type filters
 │   ├── todos.test.js      # CRUD + random todo
 │   ├── quotes.test.js     # Read-only + random quote (no write endpoints)
-│   └── mockHttp.test.js   # Simulated status codes via /http/{code} (utility, not CRUD)
+│   ├── mockHttp.test.js   # Simulated status codes via /http/{code} (utility, not CRUD)
+│   └── tools.test.js      # 2FA TOTP, Custom Response, Webhook (three utility APIs)
 ├── helpers/
 │   ├── apiClient.js       # Shared axios instance (base URL + status handling)
 │   ├── productsApi.js     # Service object — wraps every /products endpoint
@@ -55,7 +57,10 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── recipesApi.js      # Service object — wraps every /recipes endpoint
 │   ├── todosApi.js        # Service object — wraps every /todos endpoint
 │   ├── quotesApi.js       # Service object — wraps every /quotes endpoint
-│   └── mockHttpApi.js     # Service object — wraps every /http/{code} verb
+│   ├── mockHttpApi.js     # Service object — wraps every /http/{code} verb
+│   ├── totpApi.js         # Service object — wraps /2fa (GET + POST)
+│   ├── customResponseApi.js # Service object — wraps /c/generate + calling the generated URL
+│   └── webhookApi.js      # Service object — wraps every /webhook/* endpoint
 ├── package.json
 ├── CLAUDE.md              # Project spec / working notes for AI-assisted development
 └── README.md              # You are here
@@ -82,7 +87,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **10 suites / 100 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **11 suites / 111 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
 
 ## How the Suite Is Organized
 
@@ -108,7 +113,7 @@ This suite uses the **Service Object Model** — the API-testing equivalent of t
 
 **In POM**, you don't put CSS selectors and clicks directly in your test files — you wrap them in a `LoginPage` class with methods like `login(username, password)`. The test reads like a scenario; the page's mechanics live in one place.
 
-**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js`, `helpers/commentsApi.js`, `helpers/recipesApi.js`, `helpers/todosApi.js`, `helpers/quotesApi.js`, `helpers/mockHttpApi.js` — that wraps its raw HTTP calls behind readable methods:
+**In SOM**, the same idea applies to endpoints instead of pages. Each resource gets a small module — `helpers/productsApi.js`, `helpers/usersApi.js`, `helpers/authApi.js`, `helpers/cartsApi.js`, `helpers/postsApi.js`, `helpers/commentsApi.js`, `helpers/recipesApi.js`, `helpers/todosApi.js`, `helpers/quotesApi.js`, `helpers/mockHttpApi.js`, `helpers/totpApi.js`, `helpers/customResponseApi.js`, `helpers/webhookApi.js` — that wraps its raw HTTP calls behind readable methods:
 
 ```js
 // helpers/productsApi.js
@@ -216,6 +221,12 @@ const res = await productsApi.getById(id);
 - **Method-agnostic:** `GET`, `POST`, `PUT`, `PATCH`, `DELETE` all honor the same mocked code — confirmed by firing all five verbs at `/http/200` in parallel
 - **Negative:** `GET /http/999` (an unsupported/invalid status code) → the *mock endpoint itself* returns `500` with a `message` explaining the code isn't supported — a good reminder that even a "give me any status you want" endpoint has its own failure mode
 
+### Tools (`tests/tools.test.js`)
+Three unrelated utility APIs, grouped in one file since none of them model a CRUD entity. See [Understanding the Tools APIs](#understanding-the-tools-apis) below for what each one is for and when you'd reach for it.
+- **2FA TOTP:** `GET /2fa?key=` and `POST /2fa` (body `{ key }`) — both return a live 6-digit code (`totp` matches `/^\d{6}$/`), `period: 30`, `expiresIn` in `[0, 30]`. Negative: missing key → 400, malformed key → 400 (both via `POST`, since `GET /2fa` with no `key` serves the tool's HTML landing page instead of JSON — see gotchas)
+- **Custom Response:** `POST /c/generate` (body `{ json, method }`) creates a URL; calling it with the configured method echoes `json` back exactly. Calling it with the *wrong* method → 404. Omitting `method` from the create payload → 500 with a validation `message`
+- **Webhook:** `POST /webhook/create` → `{ identifier, url, expiresAt }`; sending any request to `/webhook/{identifier}` captures it (`{ received: true, requestId }`); `GET /webhook/{identifier}/requests` lists captures with full method/headers/body; `DELETE /webhook/{identifier}/requests/{requestId}` removes one. Negative: listing requests for an unknown identifier → 404
+
 ## Understanding Mock HTTP
 
 If this is your first time seeing the term, here's the mental model.
@@ -244,9 +255,41 @@ You can even override the message: `GET /http/404/Missing_field_email` returns a
 
 **A naming collision worth flagging.** This README's [Overview](#overview) says the suite does "no mocking" — that refers to **not mocking axios/the network layer** (every test still makes a real HTTP call; nothing is faked at the JavaScript level). DummyJSON's Mock HTTP feature is a completely different thing: **the *server itself*, as a real feature, agrees to fake its own response code for you.** The request is 100% real; only the status code is synthetic. Both statements are true at once — worth keeping straight since "mock" gets used both ways in this project.
 
+## Understanding the Tools APIs
+
+Mock HTTP fakes one thing: a status code. The three Tools APIs go a step further — each one gives you something *generated on demand* that you couldn't get any other way in this test suite. Here's what each is, why it exists, and when you'd actually reach for it.
+
+### 2FA TOTP (`/2fa`, alias `/totp`)
+
+**What it is.** TOTP (Time-based One-Time Password) is the 6-digit code your phone's authenticator app (Google Authenticator, Authy, etc.) shows you during 2-factor login — a code derived from a shared secret plus the current time, that changes every 30 seconds. `GET /2fa?key={secret}` or `POST /2fa` with `{ "key": "..." }` computes a **real** TOTP code from whatever secret you pass in — it's not a fake/random number, it's the actual algorithm (RFC 6238) real authenticator apps use.
+
+**Why this matters / when you'd need it.** If you're testing a login flow that requires a 2FA code as a second step, you normally can't automate past it — the code is generated on a device (or app) you don't control from a test script, and it expires in 30 seconds. This endpoint solves that: give it the *same secret* your test account was enrolled with, and it hands back the current valid code your automated test can submit — no human, no phone, no waiting. This is the difference between "our E2E suite can only test up to the 2FA screen" and "our E2E suite can log all the way in."
+
+**Condition for using it:** you need a *real, currently-valid* time-based code to submit to something that verifies it — almost always a login/step-up-auth flow in an E2E test. Prefer `POST` over `GET` for this in real usage, since a `GET` query param can end up in browser history or server access logs — a `key` is a secret, and it shouldn't be sitting in plaintext in a log file. This test suite uses `dummyjson.com` as an already-public sandbox, so it's low-stakes here — but the habit is worth keeping for real secrets.
+
+### Custom Response (`/c/generate` + the URL it returns)
+
+**What it is.** You `POST` a JSON payload and an HTTP method to `/c/generate`; DummyJSON hands back a brand-new, unique URL. Calling *that* URL with the method you specified returns your JSON back, verbatim, as if it were a real API you'd built. It's a tiny hosted stub server, generated on the fly, that persists for 90 days.
+
+**Why this matters / when you'd need it.** Say your frontend needs to call `GET /api/inventory/status` and you want to build/demo the UI *before* that backend endpoint exists, or the person who owns it hasn't shipped it yet. You can't point axios at a URL that returns 404 — there's nothing there. `/c/generate` gives you a real, callable URL you can hand to your frontend right now, that returns exactly the shape you'll eventually get from the real thing. It's also useful for testing "does my client correctly call this exact endpoint with this exact method," since the mocked endpoint enforces the method you configured (call it the wrong way and it 404s).
+
+**Condition for using it:** you need a **stable, shareable URL** that returns a fixed, pre-defined response — not just a status code (that's Mock HTTP's job), but real structured data. Reach for this over Mock HTTP whenever the response *body* is the thing under test, not just the status.
+
+### Webhook (`/webhook/create` + `/webhook/{identifier}`)
+
+**What it is.** `POST /webhook/create` mints a unique inbox URL. Anything sent to that URL — any method, any body, any headers — gets captured and stored (up to 100 requests, expiring after 1 day). `GET /webhook/{identifier}/requests` lets you look at everything that arrived, with full method/headers/body/timestamp per request.
+
+**Why this matters / when you'd need it.** Some things you build don't return a response to the caller at all — they *call out* to someone else. A "when an order ships, notify this webhook URL" feature, a Slack/Discord integration, a payment provider's "here's what happened" callback. You can't assert on those with a normal HTTP response check, because from the code under test's point of view, there's nothing to assert on — it just fired a request and moved on. A webhook capture URL solves this: point the outbound call at it, then afterward ask "what actually arrived?" and assert on *that*.
+
+**Condition for using it:** you're testing code that **sends** an HTTP request as a side effect (a notification, a callback, an event) rather than code that **receives** one. If you're testing the caller (does our system attempt the callback with the right payload), this is what you want; if you're testing the receiver (does our webhook handler correctly parse an incoming payload), you'd usually send *to* your own endpoint instead.
+
+### The common thread
+
+All three Tools APIs share a shape Mock HTTP doesn't: **they hand you back something freshly generated** — a code, a URL, an inbox — that only exists because you asked for it, and that you then use in a second step. That's the tell for "I need one of the Tools APIs" instead of a fixed-response mock: you don't just need a canned reply, you need something dynamic that didn't exist a moment ago and that only your test run owns.
+
 ## Conventions
 
-- **One file per resource**, grouped into `Create` / `Read` / `Update` / `Delete` / `negative cases` describe blocks — except read-only resources (`quotes`), which only have `Read` / `negative cases`, and the `mockHttp` utility file, which is grouped by scenario instead of CRUD since it doesn't model a data entity.
+- **One file per resource**, grouped into `Create` / `Read` / `Update` / `Delete` / `negative cases` describe blocks — except read-only resources (`quotes`), which only have `Read` / `negative cases`, and the `mockHttp`/`tools` utility files, which are grouped by scenario/tool instead of CRUD since they don't model a data entity.
 - **Tests call service objects, never `apiClient` directly.** Adding a new endpoint call means adding a method to the resource's service object in `helpers/`, not inlining a new `apiClient.get/post/...` call inside a test.
 - **No state reset between tests.** `beforeAll`/`beforeEach` are only used for shared setup (e.g. obtaining an auth token in `auth.test.js`), never to "reset" server state — DummyJSON doesn't persist writes, so there's nothing to reset.
 - **Assertions focus on:**
@@ -260,5 +303,7 @@ You can even override the message: `GET /http/404/Missing_field_email` returns a
 - **Writes don't persist.** Creating, updating, or deleting a resource returns a realistic response but has no lasting effect — running the suite repeatedly is safe and idempotent.
 - **No rate limits are documented** for DummyJSON, but avoid hammering it in tight loops out of courtesy — it's a shared public sandbox, not your own infrastructure. In practice, occasional `429` responses have been observed on the "not found" negative cases for products/users/carts, so those assertions accept `[404, 429]` rather than asserting `404` strictly.
 - **Create status codes aren't consistent across resources.** Most `POST .../add` endpoints return `201`, but `POST /recipes/add` returns `200` — verified directly against the live API before writing the assertion. Don't assume `201` when adding a new resource; check the real response first.
+- **`/c/generate` appears to be cached by payload at the CDN edge.** Calling it twice with an identical `{ json, method }` body can return a stale cached response for a request that should otherwise be fresh (observed: a wrong-method call that should 404 instead returned a cached 200). `tests/tools.test.js` works around this by including a random `nonce` field in payloads used for negative-path assertions, so each test run generates a genuinely unique URL. If you add more Custom Response tests, do the same for anything asserting on a *fresh* result.
+- **`GET /2fa` with no `key` query param doesn't return JSON.** It serves the tool's HTML landing page (200, `text/html`) instead of an API error, since the same route doubles as a browser-facing page. `tests/tools.test.js` tests the missing/invalid-key negative cases via `POST` instead, which reliably returns JSON.
 - **This is a practice/portfolio project.** Treat DummyJSON as a dev/testing aid, not production infrastructure — don't build real features on top of assumptions validated only here.
 - **Auth credentials are DummyJSON's published test user** (`emilys` / `emilyspass`), documented at [dummyjson.com/docs/auth](https://dummyjson.com/docs/auth). If DummyJSON ever rotates its seed data, update `VALID_CREDENTIALS` in `tests/auth.test.js`.

@@ -14,7 +14,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Mock HTTP](#understanding-mock-http)
 - [Understanding the Tools APIs](#understanding-the-tools-apis)
 - [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud)
-- [Parameterized Tests with test.each](#parameterized-tests-with-testeach)
+- [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
@@ -31,6 +31,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 |---|---|
 | [Jest](https://jestjs.io/) | Test runner & assertion library |
 | [axios](https://axios-http.com/) | HTTP client for calling the DummyJSON API |
+| [zod](https://zod.dev/) | Schema/contract validation for response shapes (see below) |
 | Node.js | Runtime |
 
 ## Project Structure
@@ -69,6 +70,13 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── totpApi.js         # Service object — wraps /2fa (GET + POST)
 │   ├── customResponseApi.js # Service object — wraps /c/generate + calling the generated URL
 │   └── webhookApi.js      # Service object — wraps every /webhook/* endpoint
+├── schemas/
+│   ├── productSchema.js   # Zod contract for a product item
+│   ├── userSchema.js      # Zod contract for a user item
+│   ├── cartSchema.js      # Zod contract for a cart item
+│   └── postSchema.js      # Zod contract for a post item
+├── jest.setup.js          # Registers the custom `toMatchSchema` matcher
+├── jest.config.js         # Points Jest at jest.setup.js via setupFilesAfterEnv
 ├── package.json
 ├── CLAUDE.md              # Project spec / working notes for AI-assisted development
 └── README.md              # You are here
@@ -163,14 +171,14 @@ const res = await productsApi.getById(id);
 
 ### Products (`tests/products.test.js`)
 - **Create:** `POST /products/add` — echoes title/price/category, checks `id` type
-- **Read:** `GET /products` (default pagination shape + item field types), `/products/{id}` (price/category/rating range/tags/reviews shape), `/products/search?q=` (results actually contain the query), `/products/category/{category}` (non-empty + every result matches), `/products/categories` (each entry's `slug`/`name`/`url` shape)
+- **Read:** `GET /products` (default pagination shape, every item validated against `schemas/productSchema.js`), `/products/{id}` (schema-validated), `/products/search?q=` (schema-validated + results actually contain the query), `/products/category/{category}` (schema-validated + non-empty + every result matches), `/products/categories` (each entry's `slug`/`name`/`url` shape). See [Schema Validation with Zod](#schema-validation-with-zod)
 - **Update:** `PUT /products/{id}` (full), `PATCH /products/{id}` (partial) — also asserts unmodified fields still reflect the original seed product, confirming the API merges the payload onto the existing record rather than just echoing it back
 - **Delete:** `DELETE /products/{id}` — checks `isDeleted`, `deletedOn` type, original fields preserved
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body, unknown category → empty list (200)
 
 ### Users (`tests/users.test.js`)
 - **Create:** `POST /users/add` — echoes firstName/lastName/age, checks `id` type
-- **Read:** `GET /users` (default pagination shape + item field types), `/users/{id}` (email format, address/company/username presence), `/users/search?q=` (results actually contain the query), `/users/filter?key=&value=` (non-empty + every result matches)
+- **Read:** `GET /users` (default pagination shape, every item validated against `schemas/userSchema.js`), `/users/{id}` (schema-validated), `/users/search?q=` (schema-validated + results actually contain the query), `/users/filter?key=&value=` (schema-validated + non-empty + every result matches)
 - **Update:** `PUT /users/{id}`, `PATCH /users/{id}` — also asserts unmodified fields still reflect the original seed user, confirming the API merges the payload onto the existing record rather than just echoing it back
 - **Delete:** `DELETE /users/{id}` — checks `isDeleted`, `deletedOn` type, original fields preserved
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body, filter with no matches → empty list
@@ -183,14 +191,14 @@ const res = await productsApi.getById(id);
 
 ### Carts (`tests/carts.test.js`)
 - **Create:** `POST /carts/add` — tied to a `userId`, echoes `products[]` (id/quantity per line item), checks `totalProducts`/`totalQuantity` match the payload
-- **Read:** `GET /carts` (default pagination shape + item field types), `/carts/{id}` (per-product id/title/price/quantity/total shape, `totalProducts` consistency), `/carts/user/{userId}` (non-empty + every result matches, `totalProducts` consistency)
+- **Read:** `GET /carts` (default pagination shape, every item validated against `schemas/cartSchema.js`), `/carts/{id}` (schema-validated + `totalProducts` consistency), `/carts/user/{userId}` (schema-validated + non-empty + every result matches, `totalProducts` consistency)
 - **Update:** `PUT /carts/{id}` (`merge: false` — asserts the product list is *replaced*, not appended), `PATCH /carts/{id}` (`merge: true` — asserts the product list is *appended to* the original seed cart, not replaced)
 - **Delete:** `DELETE /carts/{id}` — checks `isDeleted`, `deletedOn` type, original `userId` preserved
 - **Negative:** out-of-range cart ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent cart → 404 (or 429) with a `message` body, user with no carts → 404 (or 429) (confirmed against the live API — DummyJSON does **not** return an empty array here)
 
 ### Posts (`tests/posts.test.js`)
 - **Create:** `POST /posts/add` — echoes title/body/userId, checks `id` type
-- **Read:** `GET /posts` (default pagination shape + item field types), `/posts/{id}` (body/tags/userId/views/reactions shape), `/posts/search?q=` (results actually contain the query, matched across title *and* body)
+- **Read:** `GET /posts` (default pagination shape, every item validated against `schemas/postSchema.js`), `/posts/{id}` (schema-validated), `/posts/search?q=` (schema-validated + results actually contain the query, matched across title *and* body)
 - **Update:** `PUT /posts/{id}` — also asserts unmodified fields (`userId`, `tags`) still reflect the original seed post, confirming the API merges the payload onto the existing record rather than just echoing it back
 - **Delete:** `DELETE /posts/{id}` — checks `isDeleted`, `deletedOn` type, original title preserved
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body
@@ -318,55 +326,59 @@ Every other file in this suite tests one resource's endpoints independently — 
 - **Per-resource CRUD tests** (the other 11 files) — for verifying each endpoint's contract in isolation: status codes, response shape, negative cases. This is most of what a suite needs, and it's what makes failures easy to localize.
 - **A scenario/chained test** (this file) — for the handful of workflows that actually matter end-to-end in your product (login → checkout being the canonical example for anything with auth + a cart). You don't want dozens of these — they're slower to write, harder to debug, and redundant with the CRUD tests for anything they don't specifically chain. A small number of high-value journeys, on top of solid per-resource coverage, is the combination that actually catches integration bugs without turning the whole suite into a fragile, order-dependent mess.
 
-## Parameterized Tests with test.each
+## Schema Validation with Zod
 
-**The duplication this replaces.** Seven resources (Products, Users, Carts, Posts, Comments, Recipes, Todos) all have full CRUD, and every one of them had the exact same three negative-case tests, differing only in which service-object method got called:
+**The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
 
 ```js
-// Before — three near-identical it() blocks, repeated with minor variations in 7 files
-it('returns 404 (or 429 if rate-limited) for an out-of-range product id', async () => {
-  const res = await productsApi.getById(999999);
-  expect([404, 429]).toContain(res.status);
-  expect(res.data).toHaveProperty('message');
-});
+expect(typeof res.data.price).toBe('number');
+expect(res.data.price).toBeGreaterThan(0);
+expect(typeof res.data.category).toBe('string');
+expect(Array.isArray(res.data.tags)).toBe(true);
+expect(Array.isArray(res.data.reviews)).toBe(true);
+expect(res.data.rating).toBeGreaterThanOrEqual(0);
+expect(res.data.rating).toBeLessThanOrEqual(5);
+// ...and this only checked 5 of a product's ~20 fields
+```
 
-it('returns 404 (or 429 if rate-limited) when updating a non-existent product', async () => {
-  const res = await productsApi.update(999999, { title: 'nope' });
-  expect([404, 429]).toContain(res.status);
-  expect(res.data).toHaveProperty('message');
-});
+Every field needs its own line, it's easy to forget one, and even after all those lines, most of the object (`dimensions`, `meta`, `reviews[].reviewerEmail`, …) was never actually checked. This is what **schema validation** (also called **contract testing**) fixes: instead of asserting on fields one at a time, you write down the whole shape once — types, nested objects, array item shapes, which fields are optional — as a single schema, then check the response against it in one line.
 
-it('returns 404 (or 429 if rate-limited) when deleting a non-existent product', async () => {
-  const res = await productsApi.remove(999999);
-  expect([404, 429]).toContain(res.status);
-  expect(res.data).toHaveProperty('message');
+**What changed.** `schemas/productSchema.js`, `userSchema.js`, `cartSchema.js`, and `postSchema.js` each define the full expected shape for one item using [zod](https://zod.dev/), e.g.:
+
+```js
+// schemas/productSchema.js (abridged)
+const productSchema = z.object({
+  id: z.number(),
+  title: z.string(),
+  price: z.number().positive(),
+  rating: z.number().min(0).max(5),
+  tags: z.array(z.string()),
+  brand: z.string().optional(), // some categories don't have one
+  dimensions: z.object({ width: z.number(), height: z.number(), depth: z.number() }),
+  reviews: z.array(z.object({ rating: z.number(), comment: z.string(), reviewerEmail: z.email() /* ... */ })),
+  // ...every other field, once
 });
 ```
 
-That's the same assertion logic copy-pasted three times per file, seven files — 21 blocks that only ever differed in which method got called and what payload it sent. Jest's `test.each` turns "the same test, run with different inputs" into a data table plus one test body:
+A custom Jest matcher in `jest.setup.js` (`toMatchSchema`, wired in via `jest.config.js`) turns that into a one-line assertion anywhere in the suite:
 
 ```js
-// After — one data table, one test body, same 3 generated tests
-describe('negative cases', () => {
-  const NON_EXISTENT_ID = 999999;
-
-  test.each([
-    ['getting', () => productsApi.getById(NON_EXISTENT_ID)],
-    ['updating', () => productsApi.update(NON_EXISTENT_ID, { title: 'nope' })],
-    ['deleting', () => productsApi.remove(NON_EXISTENT_ID)],
-  ])('returns 404 (or 429 if rate-limited) when %s a non-existent product', async (_action, makeRequest) => {
-    const res = await makeRequest();
-    expect([404, 429]).toContain(res.status);
-    expect(res.data).toHaveProperty('message');
-  });
-});
+expect(res.data).toMatchSchema(productSchema);
 ```
 
-The `%s` in the title gets substituted with each row's first element, so Jest still reports three distinctly named tests — `... when getting a non-existent product`, `... when updating ...`, `... when deleting ...` — this isn't collapsing three tests into one that's harder to debug, it's generating the same three tests from one body instead of hand-copying it.
+If the shape is wrong, the failure message lists every field that didn't match — not just the first one, and not silence for fields nobody thought to check:
 
-**Why this is worth doing here specifically.** The three cases weren't just superficially similar — they were *the same test*, parameterized only by which HTTP call to make. That's exactly the case `test.each` is for: when the assertion logic is identical and only the input varies. It's a different situation from, say, Products' "unknown category returns an empty list" test, which stayed a plain `it()` — that assertion (`toEqual([])` on `200`) is genuinely different logic, not a variation on the same check, so forcing it into the same table would just make the table harder to read for no benefit.
+```
+expected value to match the provided schema, but it didn't:
+  - price: Invalid input: expected number, received string
+  - reviews.0.reviewerEmail: Invalid email address
+```
 
-**Scope: applied where the pattern was real, not everywhere.** Only the seven full-CRUD resources got this treatment. `quotes.test.js` has just one negative case (no update/delete endpoints to test), and `mockHttp.test.js`/`tools.test.js` have negative cases with genuinely different assertions per case — there was no real duplication to remove in either, so they were left as plain `it()` blocks. Reaching for `test.each` when there's nothing repeated to collapse would be manufacturing an abstraction the code doesn't need.
+**Why not just keep writing `typeof` checks?** Two reasons. First, coverage: a schema checks *every* field including nested ones, which is impractical to do by hand for an object with 20+ fields and nested arrays/objects — the old tests didn't even try (`title`, `price`, and `id` were the only three checked in the list test). Second, maintainability: if DummyJSON adds or renames a field, there's one schema file to update, not a scattered set of `expect()` lines across every test that happens to touch that resource.
+
+**The trade-off — this suite deliberately did a partial migration, not a full rewrite.** Only four resources (Products, Users, Carts, Posts) have schemas; the other eight files still use manual per-field assertions. That's not an oversight — it's how this actually gets adopted in a real codebase: you migrate the highest-value, richest-shaped resources first (these four have the deepest nesting) and leave simpler ones (`quotes`, `todos` — 2-4 flat fields each) as they are, since a schema buys much less when there's barely anything to validate. Schema validation also isn't a replacement for *business-logic* assertions — "does the search result actually contain the search term," "is `totalProducts` consistent with the array length," "did PATCH merge instead of replace" are still hand-written `expect()` calls, right alongside the `toMatchSchema()` call. Schemas check *shape*; they don't check *behavior*.
+
+**Why zod over an alternative like `ajv` + JSON Schema.** Both are legitimate choices for contract testing in JS. Zod was picked here because its schema *is* readable JavaScript (`z.object({ price: z.number().positive() })`) rather than a separate JSON Schema document (`{ "type": "object", "properties": { "price": { "type": "number", "exclusiveMinimum": 0 } } }`) — for a project this size, keeping the schema in the same language and file style as the rest of the suite outweighs `ajv`'s raw validation speed advantage, which matters more at production scale than in a test suite making a handful of calls per run.
 
 ## Continuous Integration (CI)
 
@@ -388,7 +400,7 @@ The `%s` in the title gets substituted with each row's first element, so Jest st
 - **No state reset between tests.** `beforeAll`/`beforeEach` are only used for shared setup (e.g. obtaining an auth token in `auth.test.js`), never to "reset" server state — DummyJSON doesn't persist writes, so there's nothing to reset.
 - **Assertions focus on:**
   - `res.status` matching the expected HTTP status
-  - Key fields present/correct in `res.data`
+  - Key fields present/correct in `res.data` — via a `schemas/*Schema.js` + `toMatchSchema()` for Products/Users/Carts/Posts (see [Schema Validation with Zod](#schema-validation-with-zod)), via manual per-field `expect()` calls for the rest
   - For writes, that the echoed response reflects the payload sent (not that it was actually saved)
 - **Every resource has at least one negative test:** invalid/out-of-range ID, missing required field, or invalid auth. For the seven full-CRUD resources, the get/update/delete-non-existent-id trio is written once as a `test.each` table rather than three copy-pasted `it()` blocks — see [Parameterized Tests with test.each](#parameterized-tests-with-testeach).
 - **Tests are independent of each other and order-agnostic — except `tests/userJourney.test.js`,** which is a deliberately ordered, stateful scenario chain. See [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud) for why that one file is the exception.

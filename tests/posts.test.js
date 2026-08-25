@@ -91,22 +91,14 @@ describe('Posts API', () => {
   });
 
   describe('negative cases', () => {
-    it('returns 404 (or 429 if rate-limited) for an out-of-range post id', async () => {
-      const res = await postsApi.getById(999999);
+    const NON_EXISTENT_ID = 999999;
 
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when updating a non-existent post', async () => {
-      const res = await postsApi.update(999999, { title: 'nope' });
-
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when deleting a non-existent post', async () => {
-      const res = await postsApi.remove(999999);
+    test.each([
+      ['getting', () => postsApi.getById(NON_EXISTENT_ID)],
+      ['updating', () => postsApi.update(NON_EXISTENT_ID, { title: 'nope' })],
+      ['deleting', () => postsApi.remove(NON_EXISTENT_ID)],
+    ])('returns 404 (or 429 if rate-limited) when %s a non-existent post', async (_action, makeRequest) => {
+      const res = await makeRequest();
 
       expect([404, 429]).toContain(res.status);
       expect(res.data).toHaveProperty('message');

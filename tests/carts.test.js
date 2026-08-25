@@ -127,22 +127,14 @@ describe('Carts API', () => {
   });
 
   describe('negative cases', () => {
-    it('returns 404 (or 429 if rate-limited) for an out-of-range cart id', async () => {
-      const res = await cartsApi.getById(999999);
+    const NON_EXISTENT_ID = 999999;
 
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when updating a non-existent cart', async () => {
-      const res = await cartsApi.update(999999, { products: [] });
-
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when deleting a non-existent cart', async () => {
-      const res = await cartsApi.remove(999999);
+    test.each([
+      ['getting', () => cartsApi.getById(NON_EXISTENT_ID)],
+      ['updating', () => cartsApi.update(NON_EXISTENT_ID, { products: [] })],
+      ['deleting', () => cartsApi.remove(NON_EXISTENT_ID)],
+    ])('returns 404 (or 429 if rate-limited) when %s a non-existent cart', async (_action, makeRequest) => {
+      const res = await makeRequest();
 
       expect([404, 429]).toContain(res.status);
       expect(res.data).toHaveProperty('message');

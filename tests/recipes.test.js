@@ -137,22 +137,14 @@ describe('Recipes API', () => {
   });
 
   describe('negative cases', () => {
-    it('returns 404 (or 429 if rate-limited) for an out-of-range recipe id', async () => {
-      const res = await recipesApi.getById(999999);
+    const NON_EXISTENT_ID = 999999;
 
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when updating a non-existent recipe', async () => {
-      const res = await recipesApi.update(999999, { name: 'nope' });
-
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when deleting a non-existent recipe', async () => {
-      const res = await recipesApi.remove(999999);
+    test.each([
+      ['getting', () => recipesApi.getById(NON_EXISTENT_ID)],
+      ['updating', () => recipesApi.update(NON_EXISTENT_ID, { name: 'nope' })],
+      ['deleting', () => recipesApi.remove(NON_EXISTENT_ID)],
+    ])('returns 404 (or 429 if rate-limited) when %s a non-existent recipe', async (_action, makeRequest) => {
+      const res = await makeRequest();
 
       expect([404, 429]).toContain(res.status);
       expect(res.data).toHaveProperty('message');

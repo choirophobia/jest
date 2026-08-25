@@ -14,6 +14,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Mock HTTP](#understanding-mock-http)
 - [Understanding the Tools APIs](#understanding-the-tools-apis)
 - [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud)
+- [Parameterized Tests with test.each](#parameterized-tests-with-testeach)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
@@ -317,6 +318,56 @@ Every other file in this suite tests one resource's endpoints independently — 
 - **Per-resource CRUD tests** (the other 11 files) — for verifying each endpoint's contract in isolation: status codes, response shape, negative cases. This is most of what a suite needs, and it's what makes failures easy to localize.
 - **A scenario/chained test** (this file) — for the handful of workflows that actually matter end-to-end in your product (login → checkout being the canonical example for anything with auth + a cart). You don't want dozens of these — they're slower to write, harder to debug, and redundant with the CRUD tests for anything they don't specifically chain. A small number of high-value journeys, on top of solid per-resource coverage, is the combination that actually catches integration bugs without turning the whole suite into a fragile, order-dependent mess.
 
+## Parameterized Tests with test.each
+
+**The duplication this replaces.** Seven resources (Products, Users, Carts, Posts, Comments, Recipes, Todos) all have full CRUD, and every one of them had the exact same three negative-case tests, differing only in which service-object method got called:
+
+```js
+// Before — three near-identical it() blocks, repeated with minor variations in 7 files
+it('returns 404 (or 429 if rate-limited) for an out-of-range product id', async () => {
+  const res = await productsApi.getById(999999);
+  expect([404, 429]).toContain(res.status);
+  expect(res.data).toHaveProperty('message');
+});
+
+it('returns 404 (or 429 if rate-limited) when updating a non-existent product', async () => {
+  const res = await productsApi.update(999999, { title: 'nope' });
+  expect([404, 429]).toContain(res.status);
+  expect(res.data).toHaveProperty('message');
+});
+
+it('returns 404 (or 429 if rate-limited) when deleting a non-existent product', async () => {
+  const res = await productsApi.remove(999999);
+  expect([404, 429]).toContain(res.status);
+  expect(res.data).toHaveProperty('message');
+});
+```
+
+That's the same assertion logic copy-pasted three times per file, seven files — 21 blocks that only ever differed in which method got called and what payload it sent. Jest's `test.each` turns "the same test, run with different inputs" into a data table plus one test body:
+
+```js
+// After — one data table, one test body, same 3 generated tests
+describe('negative cases', () => {
+  const NON_EXISTENT_ID = 999999;
+
+  test.each([
+    ['getting', () => productsApi.getById(NON_EXISTENT_ID)],
+    ['updating', () => productsApi.update(NON_EXISTENT_ID, { title: 'nope' })],
+    ['deleting', () => productsApi.remove(NON_EXISTENT_ID)],
+  ])('returns 404 (or 429 if rate-limited) when %s a non-existent product', async (_action, makeRequest) => {
+    const res = await makeRequest();
+    expect([404, 429]).toContain(res.status);
+    expect(res.data).toHaveProperty('message');
+  });
+});
+```
+
+The `%s` in the title gets substituted with each row's first element, so Jest still reports three distinctly named tests — `... when getting a non-existent product`, `... when updating ...`, `... when deleting ...` — this isn't collapsing three tests into one that's harder to debug, it's generating the same three tests from one body instead of hand-copying it.
+
+**Why this is worth doing here specifically.** The three cases weren't just superficially similar — they were *the same test*, parameterized only by which HTTP call to make. That's exactly the case `test.each` is for: when the assertion logic is identical and only the input varies. It's a different situation from, say, Products' "unknown category returns an empty list" test, which stayed a plain `it()` — that assertion (`toEqual([])` on `200`) is genuinely different logic, not a variation on the same check, so forcing it into the same table would just make the table harder to read for no benefit.
+
+**Scope: applied where the pattern was real, not everywhere.** Only the seven full-CRUD resources got this treatment. `quotes.test.js` has just one negative case (no update/delete endpoints to test), and `mockHttp.test.js`/`tools.test.js` have negative cases with genuinely different assertions per case — there was no real duplication to remove in either, so they were left as plain `it()` blocks. Reaching for `test.each` when there's nothing repeated to collapse would be manufacturing an abstraction the code doesn't need.
+
 ## Continuous Integration (CI)
 
 **What CI means, in plain terms.** Continuous Integration is just: *every time someone changes the code, a computer automatically runs the tests* — instead of relying on a person to remember to run them locally before pushing. If the tests fail, everyone can see it immediately (on the pull request, or on the commit) instead of finding out later that something broke.
@@ -339,7 +390,7 @@ Every other file in this suite tests one resource's endpoints independently — 
   - `res.status` matching the expected HTTP status
   - Key fields present/correct in `res.data`
   - For writes, that the echoed response reflects the payload sent (not that it was actually saved)
-- **Every resource has at least one negative test:** invalid/out-of-range ID, missing required field, or invalid auth.
+- **Every resource has at least one negative test:** invalid/out-of-range ID, missing required field, or invalid auth. For the seven full-CRUD resources, the get/update/delete-non-existent-id trio is written once as a `test.each` table rather than three copy-pasted `it()` blocks — see [Parameterized Tests with test.each](#parameterized-tests-with-testeach).
 - **Tests are independent of each other and order-agnostic — except `tests/userJourney.test.js`,** which is a deliberately ordered, stateful scenario chain. See [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud) for why that one file is the exception.
 
 ## Important Notes & Gotchas

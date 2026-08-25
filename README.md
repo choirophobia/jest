@@ -13,6 +13,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Coverage by Resource](#coverage-by-resource)
 - [Understanding Mock HTTP](#understanding-mock-http)
 - [Understanding the Tools APIs](#understanding-the-tools-apis)
+- [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
 
@@ -45,7 +46,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── todos.test.js      # CRUD + random todo
 │   ├── quotes.test.js     # Read-only + random quote (no write endpoints)
 │   ├── mockHttp.test.js   # Simulated status codes via /http/{code} (utility, not CRUD)
-│   └── tools.test.js      # 2FA TOTP, Custom Response, Webhook (three utility APIs)
+│   ├── tools.test.js      # 2FA TOTP, Custom Response, Webhook (three utility APIs)
+│   └── userJourney.test.js # Chained scenario: login → view cart → update → checkout
 ├── helpers/
 │   ├── apiClient.js       # Shared axios instance (base URL + status handling)
 │   ├── productsApi.js     # Service object — wraps every /products endpoint
@@ -87,7 +89,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **11 suites / 111 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **12 suites / 117 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
 
 ## How the Suite Is Organized
 
@@ -227,6 +229,15 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Custom Response:** `POST /c/generate` (body `{ json, method }`) creates a URL; calling it with the configured method echoes `json` back exactly. Calling it with the *wrong* method → 404. Omitting `method` from the create payload → 500 with a validation `message`
 - **Webhook:** `POST /webhook/create` → `{ identifier, url, expiresAt }`; sending any request to `/webhook/{identifier}` captures it (`{ received: true, requestId }`); `GET /webhook/{identifier}/requests` lists captures with full method/headers/body; `DELETE /webhook/{identifier}/requests/{requestId}` removes one. Negative: listing requests for an unknown identifier → 404
 
+### User Journey (`tests/userJourney.test.js`)
+- **Not a resource — a scenario.** A single ordered chain across Auth, Users, and Carts, reusing only existing service objects (no new `helpers/` file). See [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud) below for why this file exists and how it differs from every other file in the suite.
+- **Step 1:** `POST /auth/login` — captures `accessToken` and the logged-in `userId`/`email`
+- **Step 2:** `GET /auth/me` with that token — confirms it authenticates as the same `userId`/`email` from step 1
+- **Step 3:** `GET /users/{id}` with that `userId` — cross-checks `email` matches across two different resources (`/auth` vs `/users`)
+- **Step 4:** `GET /carts/user/{userId}` — reads the user's real seed cart, capturing its `id` and current product list
+- **Step 5:** `PATCH /carts/{id}` (`merge: true`) — adds one new product, asserts the product count grew by exactly one relative to step 4's real data
+- **Step 6:** `DELETE /carts/{id}` — "checks out," asserting the deleted cart's `userId` still matches the `userId` from step 1
+
 ## Understanding Mock HTTP
 
 If this is your first time seeing the term, here's the mental model.
@@ -287,6 +298,20 @@ Mock HTTP fakes one thing: a status code. The three Tools APIs go a step further
 
 All three Tools APIs share a shape Mock HTTP doesn't: **they hand you back something freshly generated** — a code, a URL, an inbox — that only exists because you asked for it, and that you then use in a second step. That's the tell for "I need one of the Tools APIs" instead of a fixed-response mock: you don't just need a canned reply, you need something dynamic that didn't exist a moment ago and that only your test run owns.
 
+## Scenario Tests: Beyond Isolated CRUD
+
+Every other file in this suite tests one resource's endpoints independently — each `it` block sets up its own state, makes one call, and asserts on it, with no dependency on any other test. That's the right default: independent tests are easy to run in isolation, easy to debug (a failure means exactly one thing broke), and safe to run in any order.
+
+`tests/userJourney.test.js` is different on purpose. It's a **chained scenario** — a sequence of steps modeling one realistic user session (log in → confirm identity → view your cart → add an item → check out), where each step's assertions use data produced by the step *before* it (the `userId` from login is the one checked against `/users/{id}`; the real cart `id` found in step 4 is the one patched in step 5 and deleted in step 6).
+
+**Why this is worth having, beyond per-resource CRUD tests.** Isolated CRUD tests answer "does this one endpoint work correctly given a well-formed request?" They don't answer "does data actually flow correctly *between* endpoints the way a real user's session would?" Those are different failure modes. An API can pass every isolated CRUD test and still be broken end-to-end — e.g. if the `id` returned by login didn't actually match the `id` used elsewhere, every individual endpoint test would still pass (each one uses its own hardcoded id), and only a chained test would catch the mismatch. That's the gap this file targets.
+
+**The trade-off, stated plainly.** This file breaks the "tests are independent" rule the rest of the suite follows: its six `it` blocks share mutable state via a `session` object and must run in the order they're written. That's a real cost — you can't `jest -t "step 5"` in isolation and expect it to pass, and a failure in step 2 will cascade into failures in steps 3–6 even though nothing is actually wrong with them. It's an intentional, contained exception (one file, clearly commented), not the suite's normal pattern — the other 11 files stay independent.
+
+**When to reach for this pattern vs. per-resource tests:**
+- **Per-resource CRUD tests** (the other 11 files) — for verifying each endpoint's contract in isolation: status codes, response shape, negative cases. This is most of what a suite needs, and it's what makes failures easy to localize.
+- **A scenario/chained test** (this file) — for the handful of workflows that actually matter end-to-end in your product (login → checkout being the canonical example for anything with auth + a cart). You don't want dozens of these — they're slower to write, harder to debug, and redundant with the CRUD tests for anything they don't specifically chain. A small number of high-value journeys, on top of solid per-resource coverage, is the combination that actually catches integration bugs without turning the whole suite into a fragile, order-dependent mess.
+
 ## Conventions
 
 - **One file per resource**, grouped into `Create` / `Read` / `Update` / `Delete` / `negative cases` describe blocks — except read-only resources (`quotes`), which only have `Read` / `negative cases`, and the `mockHttp`/`tools` utility files, which are grouped by scenario/tool instead of CRUD since they don't model a data entity.
@@ -297,6 +322,7 @@ All three Tools APIs share a shape Mock HTTP doesn't: **they hand you back somet
   - Key fields present/correct in `res.data`
   - For writes, that the echoed response reflects the payload sent (not that it was actually saved)
 - **Every resource has at least one negative test:** invalid/out-of-range ID, missing required field, or invalid auth.
+- **Tests are independent of each other and order-agnostic — except `tests/userJourney.test.js`,** which is a deliberately ordered, stateful scenario chain. See [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud) for why that one file is the exception.
 
 ## Important Notes & Gotchas
 

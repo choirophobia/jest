@@ -85,22 +85,14 @@ describe('Todos API', () => {
   });
 
   describe('negative cases', () => {
-    it('returns 404 (or 429 if rate-limited) for an out-of-range todo id', async () => {
-      const res = await todosApi.getById(999999);
+    const NON_EXISTENT_ID = 999999;
 
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when updating a non-existent todo', async () => {
-      const res = await todosApi.update(999999, { completed: true });
-
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when deleting a non-existent todo', async () => {
-      const res = await todosApi.remove(999999);
+    test.each([
+      ['getting', () => todosApi.getById(NON_EXISTENT_ID)],
+      ['updating', () => todosApi.update(NON_EXISTENT_ID, { completed: true })],
+      ['deleting', () => todosApi.remove(NON_EXISTENT_ID)],
+    ])('returns 404 (or 429 if rate-limited) when %s a non-existent todo', async (_action, makeRequest) => {
+      const res = await makeRequest();
 
       expect([404, 429]).toContain(res.status);
       expect(res.data).toHaveProperty('message');

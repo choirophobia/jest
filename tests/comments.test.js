@@ -90,22 +90,14 @@ describe('Comments API', () => {
   });
 
   describe('negative cases', () => {
-    it('returns 404 (or 429 if rate-limited) for an out-of-range comment id', async () => {
-      const res = await commentsApi.getById(999999);
+    const NON_EXISTENT_ID = 999999;
 
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when updating a non-existent comment', async () => {
-      const res = await commentsApi.update(999999, { body: 'nope' });
-
-      expect([404, 429]).toContain(res.status);
-      expect(res.data).toHaveProperty('message');
-    });
-
-    it('returns 404 (or 429 if rate-limited) when deleting a non-existent comment', async () => {
-      const res = await commentsApi.remove(999999);
+    test.each([
+      ['getting', () => commentsApi.getById(NON_EXISTENT_ID)],
+      ['updating', () => commentsApi.update(NON_EXISTENT_ID, { body: 'nope' })],
+      ['deleting', () => commentsApi.remove(NON_EXISTENT_ID)],
+    ])('returns 404 (or 429 if rate-limited) when %s a non-existent comment', async (_action, makeRequest) => {
+      const res = await makeRequest();
 
       expect([404, 429]).toContain(res.status);
       expect(res.data).toHaveProperty('message');

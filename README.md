@@ -402,7 +402,7 @@ expected value to match the provided schema, but it didn't:
   - `res.status` matching the expected HTTP status
   - Key fields present/correct in `res.data` — via a `schemas/*Schema.js` + `toMatchSchema()` for Products/Users/Carts/Posts (see [Schema Validation with Zod](#schema-validation-with-zod)), via manual per-field `expect()` calls for the rest
   - For writes, that the echoed response reflects the payload sent (not that it was actually saved)
-- **Every resource has at least one negative test:** invalid/out-of-range ID, missing required field, or invalid auth.
+- **Every resource has at least one negative test:** invalid/out-of-range ID, missing required field, or invalid auth. For the seven full-CRUD resources, the get/update/delete-non-existent-id trio is written once as a `test.each` table rather than three copy-pasted `it()` blocks — see [Parameterized Tests with test.each](#parameterized-tests-with-testeach).
 - **Tests are independent of each other and order-agnostic — except `tests/userJourney.test.js`,** which is a deliberately ordered, stateful scenario chain. See [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud) for why that one file is the exception.
 
 ## Important Notes & Gotchas

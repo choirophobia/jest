@@ -14,6 +14,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Mock HTTP](#understanding-mock-http)
 - [Understanding the Tools APIs](#understanding-the-tools-apis)
 - [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud)
+- [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
 
@@ -48,6 +49,10 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── mockHttp.test.js   # Simulated status codes via /http/{code} (utility, not CRUD)
 │   ├── tools.test.js      # 2FA TOTP, Custom Response, Webhook (three utility APIs)
 │   └── userJourney.test.js # Chained scenario: login → view cart → update → checkout
+├── .github/
+│   └── workflows/
+│       ├── ci.yml               # Runs the full suite on every push/PR to main
+│       └── daily-jest-tests.yml # Runs the suite daily on a schedule, posts results to Discord
 ├── helpers/
 │   ├── apiClient.js       # Shared axios instance (base URL + status handling)
 │   ├── productsApi.js     # Service object — wraps every /products endpoint
@@ -311,6 +316,19 @@ Every other file in this suite tests one resource's endpoints independently — 
 **When to reach for this pattern vs. per-resource tests:**
 - **Per-resource CRUD tests** (the other 11 files) — for verifying each endpoint's contract in isolation: status codes, response shape, negative cases. This is most of what a suite needs, and it's what makes failures easy to localize.
 - **A scenario/chained test** (this file) — for the handful of workflows that actually matter end-to-end in your product (login → checkout being the canonical example for anything with auth + a cart). You don't want dozens of these — they're slower to write, harder to debug, and redundant with the CRUD tests for anything they don't specifically chain. A small number of high-value journeys, on top of solid per-resource coverage, is the combination that actually catches integration bugs without turning the whole suite into a fragile, order-dependent mess.
+
+## Continuous Integration (CI)
+
+**What CI means, in plain terms.** Continuous Integration is just: *every time someone changes the code, a computer automatically runs the tests* — instead of relying on a person to remember to run them locally before pushing. If the tests fail, everyone can see it immediately (on the pull request, or on the commit) instead of finding out later that something broke.
+
+**What's set up here — two separate workflows, two separate jobs:**
+
+- **`.github/workflows/ci.yml`** — runs on every `push` and `pull_request` targeting `main`. This is the "did this change break anything" check: install dependencies (`npm ci`), run `npm test`. If any test fails, the workflow fails, and that shows up as a red ✗ right on the pull request — the same signal you'd see on any real engineering team's PR checks.
+- **`.github/workflows/daily-jest-tests.yml`** — runs once a day on a schedule (plus an on-demand "Run workflow" button), independent of any code change. This isn't checking *your* changes — it's checking whether the suite still passes against DummyJSON *right now*, since DummyJSON is a live external API that could change its responses or go down without anyone touching this repo. It posts a pass/fail summary to a Discord webhook, so a break gets noticed without anyone having to go look. This needs a `DISCORD_WEBHOOK_URL` secret configured in the repo settings to actually post; without it, the test run itself still works, only the notification step fails.
+
+**Why two workflows instead of one.** They're answering different questions. "Did my change break the suite?" needs to run fast and block bad merges — that's `push`/`pull_request`. "Is the suite still healthy against a live third-party API I don't control?" needs to run on a timer regardless of whether anyone touched the code — that's `schedule`. Bolting the daily/Discord logic onto the push/PR trigger would mean every PR check also posts a Discord notification, which is noisy and not what either workflow is for.
+
+**Why this matters for a portfolio project specifically.** Tests that only run when a human remembers to run them locally are much weaker than tests that run automatically — CI is what turns "I wrote tests" into "these tests are actually enforced." It's also one of the fastest, lowest-effort things to point to in an interview: a green checkmark on a PR is a concrete, verifiable signal that doesn't require anyone to trust a claim.
 
 ## Conventions
 

@@ -1,4 +1,5 @@
 const { productsApi } = require('../helpers/productsApi');
+const { productSchema } = require('../schemas/productSchema');
 
 describe('Products API', () => {
   describe('Create', () => {
@@ -27,10 +28,10 @@ describe('Products API', () => {
       expect(res.data.limit).toBe(30);
       expect(res.data.products).toHaveLength(res.data.limit);
       expect(res.data.total).toBeGreaterThan(res.data.products.length);
+      // One schema check per item replaces what used to be three separate
+      // typeof assertions — and validates every field, not just three of them.
       res.data.products.forEach((product) => {
-        expect(typeof product.id).toBe('number');
-        expect(typeof product.title).toBe('string');
-        expect(typeof product.price).toBe('number');
+        expect(product).toMatchSchema(productSchema);
       });
     });
 
@@ -39,14 +40,7 @@ describe('Products API', () => {
 
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
-      expect(res.data).toHaveProperty('title');
-      expect(typeof res.data.price).toBe('number');
-      expect(res.data.price).toBeGreaterThan(0);
-      expect(typeof res.data.category).toBe('string');
-      expect(Array.isArray(res.data.tags)).toBe(true);
-      expect(Array.isArray(res.data.reviews)).toBe(true);
-      expect(res.data.rating).toBeGreaterThanOrEqual(0);
-      expect(res.data.rating).toBeLessThanOrEqual(5);
+      expect(res.data).toMatchSchema(productSchema);
     });
 
     it('searches products by query', async () => {
@@ -56,6 +50,7 @@ describe('Products API', () => {
       expect(Array.isArray(res.data.products)).toBe(true);
       expect(res.data.products.length).toBeGreaterThan(0);
       res.data.products.forEach((product) => {
+        expect(product).toMatchSchema(productSchema);
         const haystack = `${product.title} ${product.description}`.toLowerCase();
         expect(haystack).toEqual(expect.stringContaining('phone'));
       });
@@ -68,6 +63,7 @@ describe('Products API', () => {
       expect(Array.isArray(res.data.products)).toBe(true);
       expect(res.data.products.length).toBeGreaterThan(0);
       res.data.products.forEach((product) => {
+        expect(product).toMatchSchema(productSchema);
         expect(product.category).toBe('smartphones');
       });
     });

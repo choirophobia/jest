@@ -1,4 +1,5 @@
 const { usersApi } = require('../helpers/usersApi');
+const { userSchema } = require('../schemas/userSchema');
 
 describe('Users API', () => {
   describe('Create', () => {
@@ -27,9 +28,10 @@ describe('Users API', () => {
       expect(res.data.limit).toBe(30);
       expect(res.data.users).toHaveLength(res.data.limit);
       expect(res.data.total).toBeGreaterThan(res.data.users.length);
+      // One schema check per item replaces two shallow typeof assertions and
+      // validates the entire nested shape (address, company, hair, bank, ...).
       res.data.users.forEach((user) => {
-        expect(typeof user.id).toBe('number');
-        expect(typeof user.email).toBe('string');
+        expect(user).toMatchSchema(userSchema);
       });
     });
 
@@ -38,14 +40,7 @@ describe('Users API', () => {
 
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
-      expect(res.data).toHaveProperty('firstName');
-      expect(res.data).toHaveProperty('email');
-      expect(res.data.email).toEqual(expect.stringMatching(/^\S+@\S+\.\S+$/));
-      expect(typeof res.data.age).toBe('number');
-      expect(res.data).toHaveProperty('username');
-      expect(res.data).toHaveProperty('address');
-      expect(res.data).toHaveProperty('company');
-      expect(['male', 'female']).toContain(res.data.gender);
+      expect(res.data).toMatchSchema(userSchema);
     });
 
     it('searches users by query', async () => {
@@ -56,6 +51,7 @@ describe('Users API', () => {
       expect(res.data).toHaveProperty('total');
       expect(res.data.users.length).toBeGreaterThan(0);
       res.data.users.forEach((user) => {
+        expect(user).toMatchSchema(userSchema);
         const haystack = `${user.firstName} ${user.lastName} ${user.email}`.toLowerCase();
         expect(haystack).toEqual(expect.stringContaining('a'));
       });
@@ -68,6 +64,7 @@ describe('Users API', () => {
       expect(Array.isArray(res.data.users)).toBe(true);
       expect(res.data.users.length).toBeGreaterThan(0);
       res.data.users.forEach((user) => {
+        expect(user).toMatchSchema(userSchema);
         expect(user.hair.color).toBe('Brown');
       });
     });

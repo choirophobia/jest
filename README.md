@@ -14,6 +14,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Mock HTTP](#understanding-mock-http)
 - [Understanding the Tools APIs](#understanding-the-tools-apis)
 - [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud)
+- [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
@@ -30,6 +31,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 |---|---|
 | [Jest](https://jestjs.io/) | Test runner & assertion library |
 | [axios](https://axios-http.com/) | HTTP client for calling the DummyJSON API |
+| [zod](https://zod.dev/) | Schema/contract validation for response shapes (see below) |
 | Node.js | Runtime |
 
 ## Project Structure
@@ -68,6 +70,13 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── totpApi.js         # Service object — wraps /2fa (GET + POST)
 │   ├── customResponseApi.js # Service object — wraps /c/generate + calling the generated URL
 │   └── webhookApi.js      # Service object — wraps every /webhook/* endpoint
+├── schemas/
+│   ├── productSchema.js   # Zod contract for a product item
+│   ├── userSchema.js      # Zod contract for a user item
+│   ├── cartSchema.js      # Zod contract for a cart item
+│   └── postSchema.js      # Zod contract for a post item
+├── jest.setup.js          # Registers the custom `toMatchSchema` matcher
+├── jest.config.js         # Points Jest at jest.setup.js via setupFilesAfterEnv
 ├── package.json
 ├── CLAUDE.md              # Project spec / working notes for AI-assisted development
 └── README.md              # You are here
@@ -162,14 +171,14 @@ const res = await productsApi.getById(id);
 
 ### Products (`tests/products.test.js`)
 - **Create:** `POST /products/add` — echoes title/price/category, checks `id` type
-- **Read:** `GET /products` (default pagination shape + item field types), `/products/{id}` (price/category/rating range/tags/reviews shape), `/products/search?q=` (results actually contain the query), `/products/category/{category}` (non-empty + every result matches), `/products/categories` (each entry's `slug`/`name`/`url` shape)
+- **Read:** `GET /products` (default pagination shape, every item validated against `schemas/productSchema.js`), `/products/{id}` (schema-validated), `/products/search?q=` (schema-validated + results actually contain the query), `/products/category/{category}` (schema-validated + non-empty + every result matches), `/products/categories` (each entry's `slug`/`name`/`url` shape). See [Schema Validation with Zod](#schema-validation-with-zod)
 - **Update:** `PUT /products/{id}` (full), `PATCH /products/{id}` (partial) — also asserts unmodified fields still reflect the original seed product, confirming the API merges the payload onto the existing record rather than just echoing it back
 - **Delete:** `DELETE /products/{id}` — checks `isDeleted`, `deletedOn` type, original fields preserved
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body, unknown category → empty list (200)
 
 ### Users (`tests/users.test.js`)
 - **Create:** `POST /users/add` — echoes firstName/lastName/age, checks `id` type
-- **Read:** `GET /users` (default pagination shape + item field types), `/users/{id}` (email format, address/company/username presence), `/users/search?q=` (results actually contain the query), `/users/filter?key=&value=` (non-empty + every result matches)
+- **Read:** `GET /users` (default pagination shape, every item validated against `schemas/userSchema.js`), `/users/{id}` (schema-validated), `/users/search?q=` (schema-validated + results actually contain the query), `/users/filter?key=&value=` (schema-validated + non-empty + every result matches)
 - **Update:** `PUT /users/{id}`, `PATCH /users/{id}` — also asserts unmodified fields still reflect the original seed user, confirming the API merges the payload onto the existing record rather than just echoing it back
 - **Delete:** `DELETE /users/{id}` — checks `isDeleted`, `deletedOn` type, original fields preserved
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body, filter with no matches → empty list
@@ -182,14 +191,14 @@ const res = await productsApi.getById(id);
 
 ### Carts (`tests/carts.test.js`)
 - **Create:** `POST /carts/add` — tied to a `userId`, echoes `products[]` (id/quantity per line item), checks `totalProducts`/`totalQuantity` match the payload
-- **Read:** `GET /carts` (default pagination shape + item field types), `/carts/{id}` (per-product id/title/price/quantity/total shape, `totalProducts` consistency), `/carts/user/{userId}` (non-empty + every result matches, `totalProducts` consistency)
+- **Read:** `GET /carts` (default pagination shape, every item validated against `schemas/cartSchema.js`), `/carts/{id}` (schema-validated + `totalProducts` consistency), `/carts/user/{userId}` (schema-validated + non-empty + every result matches, `totalProducts` consistency)
 - **Update:** `PUT /carts/{id}` (`merge: false` — asserts the product list is *replaced*, not appended), `PATCH /carts/{id}` (`merge: true` — asserts the product list is *appended to* the original seed cart, not replaced)
 - **Delete:** `DELETE /carts/{id}` — checks `isDeleted`, `deletedOn` type, original `userId` preserved
 - **Negative:** out-of-range cart ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent cart → 404 (or 429) with a `message` body, user with no carts → 404 (or 429) (confirmed against the live API — DummyJSON does **not** return an empty array here)
 
 ### Posts (`tests/posts.test.js`)
 - **Create:** `POST /posts/add` — echoes title/body/userId, checks `id` type
-- **Read:** `GET /posts` (default pagination shape + item field types), `/posts/{id}` (body/tags/userId/views/reactions shape), `/posts/search?q=` (results actually contain the query, matched across title *and* body)
+- **Read:** `GET /posts` (default pagination shape, every item validated against `schemas/postSchema.js`), `/posts/{id}` (schema-validated), `/posts/search?q=` (schema-validated + results actually contain the query, matched across title *and* body)
 - **Update:** `PUT /posts/{id}` — also asserts unmodified fields (`userId`, `tags`) still reflect the original seed post, confirming the API merges the payload onto the existing record rather than just echoing it back
 - **Delete:** `DELETE /posts/{id}` — checks `isDeleted`, `deletedOn` type, original title preserved
 - **Negative:** out-of-range ID → 404 (or 429 if rate-limited) with a `message` body, update/delete non-existent ID → 404 (or 429) with a `message` body
@@ -317,6 +326,60 @@ Every other file in this suite tests one resource's endpoints independently — 
 - **Per-resource CRUD tests** (the other 11 files) — for verifying each endpoint's contract in isolation: status codes, response shape, negative cases. This is most of what a suite needs, and it's what makes failures easy to localize.
 - **A scenario/chained test** (this file) — for the handful of workflows that actually matter end-to-end in your product (login → checkout being the canonical example for anything with auth + a cart). You don't want dozens of these — they're slower to write, harder to debug, and redundant with the CRUD tests for anything they don't specifically chain. A small number of high-value journeys, on top of solid per-resource coverage, is the combination that actually catches integration bugs without turning the whole suite into a fragile, order-dependent mess.
 
+## Schema Validation with Zod
+
+**The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
+
+```js
+expect(typeof res.data.price).toBe('number');
+expect(res.data.price).toBeGreaterThan(0);
+expect(typeof res.data.category).toBe('string');
+expect(Array.isArray(res.data.tags)).toBe(true);
+expect(Array.isArray(res.data.reviews)).toBe(true);
+expect(res.data.rating).toBeGreaterThanOrEqual(0);
+expect(res.data.rating).toBeLessThanOrEqual(5);
+// ...and this only checked 5 of a product's ~20 fields
+```
+
+Every field needs its own line, it's easy to forget one, and even after all those lines, most of the object (`dimensions`, `meta`, `reviews[].reviewerEmail`, …) was never actually checked. This is what **schema validation** (also called **contract testing**) fixes: instead of asserting on fields one at a time, you write down the whole shape once — types, nested objects, array item shapes, which fields are optional — as a single schema, then check the response against it in one line.
+
+**What changed.** `schemas/productSchema.js`, `userSchema.js`, `cartSchema.js`, and `postSchema.js` each define the full expected shape for one item using [zod](https://zod.dev/), e.g.:
+
+```js
+// schemas/productSchema.js (abridged)
+const productSchema = z.object({
+  id: z.number(),
+  title: z.string(),
+  price: z.number().positive(),
+  rating: z.number().min(0).max(5),
+  tags: z.array(z.string()),
+  brand: z.string().optional(), // some categories don't have one
+  dimensions: z.object({ width: z.number(), height: z.number(), depth: z.number() }),
+  reviews: z.array(z.object({ rating: z.number(), comment: z.string(), reviewerEmail: z.email() /* ... */ })),
+  // ...every other field, once
+});
+```
+
+A custom Jest matcher in `jest.setup.js` (`toMatchSchema`, wired in via `jest.config.js`) turns that into a one-line assertion anywhere in the suite:
+
+```js
+expect(res.data).toMatchSchema(productSchema);
+```
+
+If the shape is wrong, the failure message lists every field that didn't match — not just the first one, and not silence for fields nobody thought to check:
+
+```
+expected value to match the provided schema, but it didn't:
+  - price: Invalid input: expected number, received string
+  - reviews.0.reviewerEmail: Invalid email address
+```
+
+**Why not just keep writing `typeof` checks?** Two reasons. First, coverage: a schema checks *every* field including nested ones, which is impractical to do by hand for an object with 20+ fields and nested arrays/objects — the old tests didn't even try (`title`, `price`, and `id` were the only three checked in the list test). Second, maintainability: if DummyJSON adds or renames a field, there's one schema file to update, not a scattered set of `expect()` lines across every test that happens to touch that resource.
+
+**The trade-off — this suite deliberately did a partial migration, not a full rewrite.** Only four resources (Products, Users, Carts, Posts) have schemas; the other eight files still use manual per-field assertions. That's not an oversight — it's how this actually gets adopted in a real codebase: you migrate the highest-value, richest-shaped resources first (these four have the deepest nesting) and leave simpler ones (`quotes`, `todos` — 2-4 flat fields each) as they are, since a schema buys much less when there's barely anything to validate. Schema validation also isn't a replacement for *business-logic* assertions — "does the search result actually contain the search term," "is `totalProducts` consistent with the array length," "did PATCH merge instead of replace" are still hand-written `expect()` calls, right alongside the `toMatchSchema()` call. Schemas check *shape*; they don't check *behavior*.
+
+**Why zod over an alternative like `ajv` + JSON Schema.** Both are legitimate choices for contract testing in JS. Zod was picked here because its schema *is* readable JavaScript (`z.object({ price: z.number().positive() })`) rather than a separate JSON Schema document (`{ "type": "object", "properties": { "price": { "type": "number", "exclusiveMinimum": 0 } } }`) — for a project this size, keeping the schema in the same language and file style as the rest of the suite outweighs `ajv`'s raw validation speed advantage, which matters more at production scale than in a test suite making a handful of calls per run.
+
 ## Continuous Integration (CI)
 
 **What CI means, in plain terms.** Continuous Integration is just: *every time someone changes the code, a computer automatically runs the tests* — instead of relying on a person to remember to run them locally before pushing. If the tests fail, everyone can see it immediately (on the pull request, or on the commit) instead of finding out later that something broke.
@@ -337,7 +400,7 @@ Every other file in this suite tests one resource's endpoints independently — 
 - **No state reset between tests.** `beforeAll`/`beforeEach` are only used for shared setup (e.g. obtaining an auth token in `auth.test.js`), never to "reset" server state — DummyJSON doesn't persist writes, so there's nothing to reset.
 - **Assertions focus on:**
   - `res.status` matching the expected HTTP status
-  - Key fields present/correct in `res.data`
+  - Key fields present/correct in `res.data` — via a `schemas/*Schema.js` + `toMatchSchema()` for Products/Users/Carts/Posts (see [Schema Validation with Zod](#schema-validation-with-zod)), via manual per-field `expect()` calls for the rest
   - For writes, that the echoed response reflects the payload sent (not that it was actually saved)
 - **Every resource has at least one negative test:** invalid/out-of-range ID, missing required field, or invalid auth.
 - **Tests are independent of each other and order-agnostic — except `tests/userJourney.test.js`,** which is a deliberately ordered, stateful scenario chain. See [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud) for why that one file is the exception.

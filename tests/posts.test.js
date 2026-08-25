@@ -1,4 +1,5 @@
 const { postsApi } = require('../helpers/postsApi');
+const { postSchema } = require('../schemas/postSchema');
 
 describe('Posts API', () => {
   describe('Create', () => {
@@ -28,9 +29,7 @@ describe('Posts API', () => {
       expect(res.data.posts).toHaveLength(res.data.limit);
       expect(res.data.total).toBeGreaterThan(res.data.posts.length);
       res.data.posts.forEach((post) => {
-        expect(typeof post.id).toBe('number');
-        expect(typeof post.title).toBe('string');
-        expect(typeof post.userId).toBe('number');
+        expect(post).toMatchSchema(postSchema);
       });
     });
 
@@ -39,14 +38,7 @@ describe('Posts API', () => {
 
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
-      expect(res.data).toHaveProperty('title');
-      expect(typeof res.data.body).toBe('string');
-      expect(Array.isArray(res.data.tags)).toBe(true);
-      expect(typeof res.data.userId).toBe('number');
-      expect(typeof res.data.views).toBe('number');
-      expect(res.data).toHaveProperty('reactions');
-      expect(typeof res.data.reactions.likes).toBe('number');
-      expect(typeof res.data.reactions.dislikes).toBe('number');
+      expect(res.data).toMatchSchema(postSchema);
     });
 
     it('searches posts by query', async () => {
@@ -56,6 +48,7 @@ describe('Posts API', () => {
       expect(Array.isArray(res.data.posts)).toBe(true);
       expect(res.data.posts.length).toBeGreaterThan(0);
       res.data.posts.forEach((post) => {
+        expect(post).toMatchSchema(postSchema);
         const haystack = `${post.title} ${post.body}`.toLowerCase();
         expect(haystack).toEqual(expect.stringContaining('love'));
       });

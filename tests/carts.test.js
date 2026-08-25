@@ -1,4 +1,5 @@
 const { cartsApi } = require('../helpers/cartsApi');
+const { cartSchema } = require('../schemas/cartSchema');
 
 describe('Carts API', () => {
   describe('Create', () => {
@@ -42,9 +43,7 @@ describe('Carts API', () => {
       expect(res.data.carts).toHaveLength(res.data.limit);
       expect(res.data.total).toBeGreaterThan(res.data.carts.length);
       res.data.carts.forEach((cart) => {
-        expect(typeof cart.id).toBe('number');
-        expect(typeof cart.userId).toBe('number');
-        expect(Array.isArray(cart.products)).toBe(true);
+        expect(cart).toMatchSchema(cartSchema);
       });
     });
 
@@ -53,18 +52,9 @@ describe('Carts API', () => {
 
       expect(res.status).toBe(200);
       expect(res.data.id).toBe(1);
-      expect(res.data).toHaveProperty('products');
-      expect(res.data).toHaveProperty('userId');
+      expect(res.data).toMatchSchema(cartSchema);
       expect(res.data.products.length).toBeGreaterThan(0);
-      res.data.products.forEach((product) => {
-        expect(typeof product.id).toBe('number');
-        expect(typeof product.title).toBe('string');
-        expect(typeof product.price).toBe('number');
-        expect(typeof product.quantity).toBe('number');
-        expect(typeof product.total).toBe('number');
-      });
       expect(res.data.totalProducts).toBe(res.data.products.length);
-      expect(typeof res.data.totalQuantity).toBe('number');
     });
 
     it('lists carts belonging to a specific user', async () => {
@@ -74,6 +64,7 @@ describe('Carts API', () => {
       expect(Array.isArray(res.data.carts)).toBe(true);
       expect(res.data.carts.length).toBeGreaterThan(0);
       res.data.carts.forEach((cart) => {
+        expect(cart).toMatchSchema(cartSchema);
         expect(cart.userId).toBe(1);
         expect(cart.totalProducts).toBe(cart.products.length);
       });

@@ -35,7 +35,7 @@ jobs:
       # visible on the published page instead of freezing on the last green run.
       - name: Upload test report artifact
         if: always()
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: report
 

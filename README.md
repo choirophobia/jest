@@ -32,6 +32,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 | [Jest](https://jestjs.io/) | Test runner & assertion library |
 | [axios](https://axios-http.com/) | HTTP client for calling the DummyJSON API |
 | [zod](https://zod.dev/) | Schema/contract validation for response shapes (see below) |
+| [jest-html-reporters](https://github.com/Hazyzh/jest-html-reporters) | Generates the HTML test report published to GitHub Pages |
 | Node.js | Runtime |
 
 ## Project Structure
@@ -53,7 +54,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   └── userJourney.test.js # Chained scenario: login → view cart → update → checkout
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml               # Runs the full suite on every push/PR to main
+│       ├── ci.yml               # Runs the full suite on every push/PR to main, publishes the report to GitHub Pages
 │       └── daily-jest-tests.yml # Runs the suite daily on a schedule, posts results to Discord
 ├── helpers/
 │   ├── apiClient.js       # Shared axios instance (base URL + status handling)
@@ -76,7 +77,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── cartSchema.js      # Zod contract for a cart item
 │   └── postSchema.js      # Zod contract for a post item
 ├── jest.setup.js          # Registers the custom `toMatchSchema` matcher
-├── jest.config.js         # Points Jest at jest.setup.js via setupFilesAfterEnv
+├── jest.config.js         # Points Jest at jest.setup.js + configures the HTML report
+├── report/                # Generated HTML test report (gitignored, not committed)
 ├── package.json
 ├── CLAUDE.md              # Project spec / working notes for AI-assisted development
 └── README.md              # You are here
@@ -392,6 +394,14 @@ expected value to match the provided schema, but it didn't:
 **Why two workflows instead of one.** They're answering different questions. "Did my change break the suite?" needs to run fast and block bad merges — that's `push`/`pull_request`. "Is the suite still healthy against a live third-party API I don't control?" needs to run on a timer regardless of whether anyone touched the code — that's `schedule`. Bolting the daily/Discord logic onto the push/PR trigger would mean every PR check also posts a Discord notification, which is noisy and not what either workflow is for.
 
 **Why this matters for a portfolio project specifically.** Tests that only run when a human remembers to run them locally are much weaker than tests that run automatically — CI is what turns "I wrote tests" into "these tests are actually enforced." It's also one of the fastest, lowest-effort things to point to in an interview: a green checkmark on a PR is a concrete, verifiable signal that doesn't require anyone to trust a claim.
+
+### Live test report (GitHub Pages)
+
+Every run of `npm test` also produces a visual HTML report (`report/index.html`) — which tests passed or failed, how long each took, and the full failure message for anything that broke.
+
+`ci.yml` publishes that report to **GitHub Pages** after every push to `main`, so there's a permanent, shareable link with the current state of the suite — no need to check out the repo or run anything locally to see it. It publishes even when tests fail, so the page always reflects reality rather than only ever showing green.
+
+(One-time setup needed: GitHub Pages must be turned on for this repo — Settings → Pages → Source: "GitHub Actions" — before the first publish will work.)
 
 ## Conventions
 

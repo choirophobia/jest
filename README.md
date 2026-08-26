@@ -33,6 +33,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 | [axios](https://axios-http.com/) | HTTP client for calling the DummyJSON API |
 | [zod](https://zod.dev/) | Schema/contract validation for response shapes (see below) |
 | [jest-html-reporters](https://github.com/Hazyzh/jest-html-reporters) | Generates the HTML test report published to GitHub Pages |
+| [Docker](https://www.docker.com/) | Runs the suite in a container, no local Node setup needed |
 | Node.js | Runtime |
 
 ## Project Structure
@@ -53,6 +54,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── tools.test.js      # 2FA TOTP, Custom Response, Webhook (three utility APIs)
 │   └── userJourney.test.js # Chained scenario: login → view cart → update → checkout
 ├── .github/
+│   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
 │       ├── ci.yml               # Runs the full suite on every push/PR to main, publishes the report to GitHub Pages
 │       └── daily-jest-tests.yml # Runs the suite daily on a schedule, posts results to Discord
@@ -79,6 +81,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 ├── jest.setup.js          # Registers the custom `toMatchSchema` matcher
 ├── jest.config.js         # Points Jest at jest.setup.js + configures the HTML report
 ├── report/                # Generated HTML test report (gitignored, not committed)
+├── Dockerfile              # Container image that runs the suite via `npm test`
+├── .dockerignore
 ├── package.json
 ├── CLAUDE.md              # Project spec / working notes for AI-assisted development
 └── README.md              # You are here
@@ -91,6 +95,13 @@ npm install
 ```
 
 No environment variables or API keys are needed — the suite talks directly to `https://dummyjson.com`.
+
+**Or run it with Docker, no Node install needed:**
+
+```bash
+docker build -t dummyjson-api-tests .
+docker run --rm dummyjson-api-tests
+```
 
 ## Running Tests
 
@@ -402,6 +413,21 @@ Every run of `npm test` also produces a visual HTML report (`report/index.html`)
 `ci.yml` publishes that report to **GitHub Pages** after every push to `main`, so there's a permanent, shareable link with the current state of the suite — no need to check out the repo or run anything locally to see it. It publishes even when tests fail, so the page always reflects reality rather than only ever showing green.
 
 (One-time setup needed: GitHub Pages must be turned on for this repo — Settings → Pages → Source: "GitHub Actions" — before the first publish will work.)
+
+### Docker
+
+The `Dockerfile` packages the suite into a container: `npm ci` at build time, `npm test` as the default command. This means anyone can run the full suite with two commands and no local Node/npm install at all:
+
+```bash
+docker build -t dummyjson-api-tests .
+docker run --rm dummyjson-api-tests
+```
+
+It still makes real network calls out to `https://dummyjson.com` — the container just packages the *runner*, not a fake/offline API.
+
+### Dependabot
+
+`.github/dependabot.yml` checks weekly for outdated or vulnerable dependencies — `npm` packages, the GitHub Actions used in the workflows, and the Docker base image — and opens a pull request automatically for each one it finds. No code to write or maintain; it's a config file that turns on a feature GitHub already provides.
 
 ## Conventions
 

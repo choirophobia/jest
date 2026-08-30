@@ -9,4 +9,16 @@ const apiClient = axios.create({
   validateStatus: () => true,
 });
 
+// Stamps every response with `response.duration` (ms) so any test can assert
+// on latency without each service object having to track timing itself.
+apiClient.interceptors.request.use((config) => {
+  config.metadata = { startTime: Date.now() };
+  return config;
+});
+
+apiClient.interceptors.response.use((response) => {
+  response.duration = Date.now() - response.config.metadata.startTime;
+  return response;
+});
+
 module.exports = { apiClient, BASE_URL };

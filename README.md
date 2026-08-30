@@ -14,6 +14,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Mock HTTP](#understanding-mock-http)
 - [Understanding the Tools APIs](#understanding-the-tools-apis)
 - [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud)
+- [Understanding Response-Time Assertions](#understanding-response-time-assertions)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -52,14 +53,15 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── quotes.test.js     # Read-only + random quote (no write endpoints)
 │   ├── mockHttp.test.js   # Simulated status codes via /http/{code} (utility, not CRUD)
 │   ├── tools.test.js      # 2FA TOTP, Custom Response, Webhook (three utility APIs)
-│   └── userJourney.test.js # Chained scenario: login → view cart → update → checkout
+│   ├── userJourney.test.js # Chained scenario: login → view cart → update → checkout
+│   └── performance.test.js # Response-time assertions across key endpoints
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
 │       ├── ci.yml               # Runs the full suite on every push/PR to main, publishes the report to GitHub Pages
 │       └── daily-jest-tests.yml # Runs the suite daily on a schedule, posts results to Discord
 ├── helpers/
-│   ├── apiClient.js       # Shared axios instance (base URL + status handling)
+│   ├── apiClient.js       # Shared axios instance (base URL + status handling + response timing)
 │   ├── productsApi.js     # Service object — wraps every /products endpoint
 │   ├── usersApi.js        # Service object — wraps every /users endpoint
 │   ├── authApi.js         # Service object — wraps every /auth endpoint
@@ -78,7 +80,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── userSchema.js      # Zod contract for a user item
 │   ├── cartSchema.js      # Zod contract for a cart item
 │   └── postSchema.js      # Zod contract for a post item
-├── jest.setup.js          # Registers the custom `toMatchSchema` matcher
+├── jest.setup.js          # Registers the custom `toMatchSchema` / `toRespondWithin` matchers
 ├── jest.config.js         # Points Jest at jest.setup.js + configures the HTML report
 ├── report/                # Generated HTML test report (gitignored, not committed)
 ├── Dockerfile              # Container image that runs the suite via `npm test`
@@ -116,7 +118,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **12 suites / 117 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **13 suites / 124 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
 
 ## How the Suite Is Organized
 
@@ -135,6 +137,7 @@ describe('<Resource> API', () => {
 Tests never call `axios`/`apiClient` directly — they call a **service object** method instead (see below). Underneath that, every service object is built on the shared `apiClient` in `helpers/apiClient.js`, which:
 - Fixes the base URL to `https://dummyjson.com` so calls only reference paths (`/products/1`, not the full URL).
 - Sets `validateStatus: () => true`, so 4xx/5xx responses resolve normally instead of throwing — this lets negative-case tests assert on `res.status` and `res.data.message` directly instead of wrapping calls in `try/catch`.
+- Stamps every response with `response.duration` (ms), via a request/response interceptor pair, so any test can assert on latency without tracking timing itself. See [Understanding Response-Time Assertions](#understanding-response-time-assertions).
 
 ## Service Object Model (SOM)
 
@@ -265,6 +268,11 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Step 5:** `PATCH /carts/{id}` (`merge: true`) — adds one new product, asserts the product count grew by exactly one relative to step 4's real data
 - **Step 6:** `DELETE /carts/{id}` — "checks out," asserting the deleted cart's `userId` still matches the `userId` from step 1
 
+### Performance (`tests/performance.test.js`)
+- **Not a resource — a non-functional check.** See [Understanding Response-Time Assertions](#understanding-response-time-assertions) below for why response time is tested at all, and how it differs from every functional test in this suite.
+- **Response time:** a representative read/write across four resources — `GET /products`, `GET /products/{id}`, `GET /products/search`, `GET /users`, `GET /users/{id}`, `POST /auth/login`, `GET /posts` — each asserted to resolve within a generous 3000ms budget via the custom `toRespondWithin` matcher, using the `duration` every response is stamped with by `helpers/apiClient.js`
+- **No dedicated negative block** — there's no "invalid" way to time a request; a timeout or a blown budget *is* the failure this file exists to catch
+
 ## Understanding Mock HTTP
 
 If this is your first time seeing the term, here's the mental model.
@@ -338,6 +346,34 @@ Every other file in this suite tests one resource's endpoints independently — 
 **When to reach for this pattern vs. per-resource tests:**
 - **Per-resource CRUD tests** (the other 11 files) — for verifying each endpoint's contract in isolation: status codes, response shape, negative cases. This is most of what a suite needs, and it's what makes failures easy to localize.
 - **A scenario/chained test** (this file) — for the handful of workflows that actually matter end-to-end in your product (login → checkout being the canonical example for anything with auth + a cart). You don't want dozens of these — they're slower to write, harder to debug, and redundant with the CRUD tests for anything they don't specifically chain. A small number of high-value journeys, on top of solid per-resource coverage, is the combination that actually catches integration bugs without turning the whole suite into a fragile, order-dependent mess.
+
+## Understanding Response-Time Assertions
+
+Every other test in this suite is a **functional** check: given this request, is the status code and response body correct? `tests/performance.test.js` asks a different question: given a *correct* response, did it arrive **fast enough to be usable**? A slow 200 and a broken 500 fail a real user in different ways, and only one of those is caught by the rest of this suite.
+
+**How it's wired up.** Rather than each test manually timing a call with `Date.now()` before and after, `helpers/apiClient.js` does it once, globally, via an axios interceptor pair:
+
+```js
+apiClient.interceptors.request.use((config) => {
+  config.metadata = { startTime: Date.now() };
+  return config;
+});
+
+apiClient.interceptors.response.use((response) => {
+  response.duration = Date.now() - response.config.metadata.startTime;
+  return response;
+});
+```
+
+Every response from every service object now carries a `.duration` in milliseconds, for free — no service object or test had to change. A small custom matcher (`jest.setup.js`, alongside `toMatchSchema`) turns that into a readable assertion:
+
+```js
+expect(res).toRespondWithin(3000); // fails with "expected response to respond within 3000ms, but took 4021ms"
+```
+
+**Why the threshold is 3000ms, not something tighter.** DummyJSON is a free, shared, public demo API with no published SLA and no dedicated infrastructure for this project — its baseline latency varies with unrelated traffic and isn't something this suite controls. A tight threshold (e.g. 300ms) would fail on ordinary network jitter and train everyone to ignore red performance tests, which is worse than not having them. The 3000ms budget is deliberately generous: it exists to catch a real regression or outage (an endpoint hanging, a dependency timing out) — not to enforce production-grade latency against a best-effort service. Against a first-party API with an actual SLA, this threshold should come down considerably.
+
+**When to reach for this vs. dedicated load-testing tools.** This is a *smoke-level* latency check — one request per endpoint, run alongside the rest of the suite, asking "is this endpoint still roughly as fast as it should be?" It is deliberately not a substitute for real performance/load testing (tools like k6 or Artillery, which simulate concurrent users and measure throughput/percentiles under sustained load). Reach for this pattern to catch obvious regressions in CI on every push; reach for a load-testing tool when the question changes from "did this get slow?" to "how many concurrent users can this handle before it degrades?"
 
 ## Schema Validation with Zod
 

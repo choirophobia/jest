@@ -20,4 +20,17 @@ expect.extend({
         `Received:\n${this.utils.printReceived(received)}`,
     };
   },
+
+  toRespondWithin(received, maxMs) {
+    const duration = received && received.duration;
+    const pass = typeof duration === 'number' && duration <= maxMs;
+
+    return {
+      pass,
+      message: () =>
+        pass
+          ? `expected response not to respond within ${maxMs}ms (took ${duration}ms)`
+          : `expected response to respond within ${maxMs}ms, but took ${duration}ms`,
+    };
+  },
 });

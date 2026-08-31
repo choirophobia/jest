@@ -15,6 +15,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding the Tools APIs](#understanding-the-tools-apis)
 - [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud)
 - [Understanding Response-Time Assertions](#understanding-response-time-assertions)
+- [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -54,7 +55,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── mockHttp.test.js   # Simulated status codes via /http/{code} (utility, not CRUD)
 │   ├── tools.test.js      # 2FA TOTP, Custom Response, Webhook (three utility APIs)
 │   ├── userJourney.test.js # Chained scenario: login → view cart → update → checkout
-│   └── performance.test.js # Response-time assertions across key endpoints
+│   ├── performance.test.js # Response-time assertions across key endpoints
+│   └── pagination.test.js # limit/skip boundary and negative-value tests across list endpoints
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -118,7 +120,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **13 suites / 124 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **14 suites / 138 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
 
 ## How the Suite Is Organized
 
@@ -273,6 +275,12 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Response time:** a representative read/write across four resources — `GET /products`, `GET /products/{id}`, `GET /products/search`, `GET /users`, `GET /users/{id}`, `POST /auth/login`, `GET /posts` — each asserted to resolve within a generous 3000ms budget via the custom `toRespondWithin` matcher, using the `duration` every response is stamped with by `helpers/apiClient.js`
 - **No dedicated negative block** — there's no "invalid" way to time a request; a timeout or a blown budget *is* the failure this file exists to catch
 
+### Pagination (`tests/pagination.test.js`)
+- **Not a resource — a cross-cutting contract check.** See [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing) below for what this file catches that the per-resource Read blocks don't.
+- **`limit=0` means "no limit":** `GET /products`, `/users`, `/posts` with `limit=0` each return *every* item, not zero — and the echoed `limit` field equals `total`, not `0`
+- **The echoed `limit` reflects the actual page size, not the requested one:** a full page echoes the requested limit; a partial last page (requesting more than remains) echoes the smaller actual count; `skip` past the end of the collection echoes `0` — all asserted against `products` specifically, with `total` confirmed to still reflect the real collection size even when the current page is empty
+- **Negative/non-numeric `skip`/`limit` are rejected, not clamped:** `skip=-1`, `limit=-1` → `400` with a `message` mentioning the offending field, checked across `/products`, `/users`, `/posts`; `limit=abc` / `skip=abc` → `400`, checked on `/products`
+
 ## Understanding Mock HTTP
 
 If this is your first time seeing the term, here's the mental model.
@@ -374,6 +382,20 @@ expect(res).toRespondWithin(3000); // fails with "expected response to respond w
 **Why the threshold is 3000ms, not something tighter.** DummyJSON is a free, shared, public demo API with no published SLA and no dedicated infrastructure for this project — its baseline latency varies with unrelated traffic and isn't something this suite controls. A tight threshold (e.g. 300ms) would fail on ordinary network jitter and train everyone to ignore red performance tests, which is worse than not having them. The 3000ms budget is deliberately generous: it exists to catch a real regression or outage (an endpoint hanging, a dependency timing out) — not to enforce production-grade latency against a best-effort service. Against a first-party API with an actual SLA, this threshold should come down considerably.
 
 **When to reach for this vs. dedicated load-testing tools.** This is a *smoke-level* latency check — one request per endpoint, run alongside the rest of the suite, asking "is this endpoint still roughly as fast as it should be?" It is deliberately not a substitute for real performance/load testing (tools like k6 or Artillery, which simulate concurrent users and measure throughput/percentiles under sustained load). Reach for this pattern to catch obvious regressions in CI on every push; reach for a load-testing tool when the question changes from "did this get slow?" to "how many concurrent users can this handle before it degrades?"
+
+## Understanding Pagination Boundary Testing
+
+Every resource's Read block already asserts the *happy-path* pagination shape — `GET /products` with no params returns 30 items, `total`/`limit`/`skip` are present, and so on. `tests/pagination.test.js` exists because the happy path doesn't tell you what happens at the **edges** of that contract, and those edges turned out to hide real, non-obvious behavior.
+
+**What curling the real API first turned up.** Before writing a single assertion, the actual responses were checked by hand (per this project's usual workflow — verify against the live API, don't assume). Three things were surprising enough to be worth locking in as tests:
+
+1. **`limit=0` doesn't mean "give me nothing."** It means "give me everything." `GET /products?limit=0` returns all 194 products, not an empty array — the intuitive reading of `limit=0` (as a boundary/off value) is exactly backwards here.
+2. **The `limit` field in the response is not an echo of what you asked for — it's the actual page size returned.** Request `limit=10` with only 3 items left after `skip`, and the response comes back with `"limit": 3`, not `10`. Nothing in the per-resource CRUD tests would catch this, because they only ever request page sizes the collection can fully satisfy.
+3. **Negative and non-numeric `limit`/`skip` are rejected outright (`400`), not clamped to `0` or silently ignored.** That's a real design choice worth pinning down — a naive client-side pager that lets a user scroll `skip` negative would get a clear error instead of quietly wrapping around or hanging.
+
+**Why this matters beyond DummyJSON specifically.** Off-by-one and boundary errors in pagination are one of the most common real-world API bug classes — the kind that only shows up on the *last* page, or when a filter legitimately returns zero results, or when a client passes a stale/malformed cursor. A test suite that only ever requests "page 1, default size" from a dataset that always has plenty of data will never exercise any of that. Testing `limit=0`, an overrun `skip`, and rejected negative values is cheap and catches a whole class of bugs that happy-path CRUD tests structurally cannot.
+
+**Why this is a dedicated file instead of living inside each resource's Read block.** The pagination contract (`limit`/`skip`/`total` semantics) is shared platform behavior across every list endpoint, not something specific to products or users — testing it once, parameterized across a representative few resources (`products`, `users`, `posts`), proves it's a platform-level contract without duplicating the same five edge cases into every resource file.
 
 ## Schema Validation with Zod
 

@@ -37,7 +37,7 @@ describe('Comments API', () => {
       });
     });
 
-    it('gets a single comment by id', async () => {
+    it('gets a single comment by id @smoke', async () => {
       const res = await commentsApi.getById(1);
 
       expect(res.status).toBe(200);

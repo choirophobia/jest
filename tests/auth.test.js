@@ -14,7 +14,7 @@ describe('Auth API', () => {
   });
 
   describe('Login', () => {
-    it('logs in with valid credentials and returns tokens', async () => {
+    it('logs in with valid credentials and returns tokens @smoke', async () => {
       const res = await authApi.login(VALID_CREDENTIALS);
 
       expect(res.status).toBe(200);

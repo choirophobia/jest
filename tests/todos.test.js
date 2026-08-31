@@ -35,7 +35,7 @@ describe('Todos API', () => {
       });
     });
 
-    it('gets a single todo by id', async () => {
+    it('gets a single todo by id @smoke', async () => {
       const res = await todosApi.getById(1);
 
       expect(res.status).toBe(200);

@@ -23,7 +23,7 @@ describe('Quotes API', () => {
       });
     });
 
-    it('gets a single quote by id', async () => {
+    it('gets a single quote by id @smoke', async () => {
       const res = await quotesApi.getById(1);
 
       expect(res.status).toBe(200);

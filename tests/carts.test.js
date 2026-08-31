@@ -47,7 +47,7 @@ describe('Carts API', () => {
       });
     });
 
-    it('gets a single cart by id', async () => {
+    it('gets a single cart by id @smoke', async () => {
       const res = await cartsApi.getById(1);
 
       expect(res.status).toBe(200);

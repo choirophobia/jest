@@ -16,6 +16,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud)
 - [Understanding Response-Time Assertions](#understanding-response-time-assertions)
 - [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing)
+- [Understanding Idempotency & Concurrency Testing](#understanding-idempotency--concurrency-testing)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -56,7 +57,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── tools.test.js      # 2FA TOTP, Custom Response, Webhook (three utility APIs)
 │   ├── userJourney.test.js # Chained scenario: login → view cart → update → checkout
 │   ├── performance.test.js # Response-time assertions across key endpoints
-│   └── pagination.test.js # limit/skip boundary and negative-value tests across list endpoints
+│   ├── pagination.test.js # limit/skip boundary and negative-value tests across list endpoints
+│   └── idempotency.test.js # Repeated-call and parallel-request behavior (DELETE, PUT, concurrent PATCH/POST)
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -120,7 +122,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **14 suites / 138 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **15 suites / 143 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
 
 ## How the Suite Is Organized
 
@@ -281,6 +283,13 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **The echoed `limit` reflects the actual page size, not the requested one:** a full page echoes the requested limit; a partial last page (requesting more than remains) echoes the smaller actual count; `skip` past the end of the collection echoes `0` — all asserted against `products` specifically, with `total` confirmed to still reflect the real collection size even when the current page is empty
 - **Negative/non-numeric `skip`/`limit` are rejected, not clamped:** `skip=-1`, `limit=-1` → `400` with a `message` mentioning the offending field, checked across `/products`, `/users`, `/posts`; `limit=abc` / `skip=abc` → `400`, checked on `/products`
 
+### Idempotency & Concurrency (`tests/idempotency.test.js`)
+- **Not a resource — repeated- and parallel-call behavior.** See [Understanding Idempotency & Concurrency Testing](#understanding-idempotency--concurrency-testing) below for what this file can and can't prove against a stateless mock, and why that distinction matters.
+- **Repeated DELETE:** calling `DELETE /products/{id}` (and separately `/users/{id}`) twice in a row returns `200` + `isDeleted: true` **both** times, rather than `404` on the second call — documenting how DummyJSON's simulated deletes differ from a real backend's
+- **Idempotent PUT:** the same `PUT /products/{id}` payload sent twice produces an identical response body both times
+- **Concurrent PATCH:** 5 parallel `PATCH /products/1` calls, each with a different payload (fired via `Promise.all`), each resolve with **their own** echoed value — no cross-contamination between simultaneous requests
+- **Concurrent POST:** 3 parallel `POST /products/add` calls all succeed and each echoes its own payload correctly, but all three are handed the **same** simulated `id` — documenting that this mock computes "next id" statelessly per-request rather than persisting a real counter, unlike a production backend under concurrent writes
+
 ## Understanding Mock HTTP
 
 If this is your first time seeing the term, here's the mental model.
@@ -396,6 +405,20 @@ Every resource's Read block already asserts the *happy-path* pagination shape �
 **Why this matters beyond DummyJSON specifically.** Off-by-one and boundary errors in pagination are one of the most common real-world API bug classes — the kind that only shows up on the *last* page, or when a filter legitimately returns zero results, or when a client passes a stale/malformed cursor. A test suite that only ever requests "page 1, default size" from a dataset that always has plenty of data will never exercise any of that. Testing `limit=0`, an overrun `skip`, and rejected negative values is cheap and catches a whole class of bugs that happy-path CRUD tests structurally cannot.
 
 **Why this is a dedicated file instead of living inside each resource's Read block.** The pagination contract (`limit`/`skip`/`total` semantics) is shared platform behavior across every list endpoint, not something specific to products or users — testing it once, parameterized across a representative few resources (`products`, `users`, `posts`), proves it's a platform-level contract without duplicating the same five edge cases into every resource file.
+
+## Understanding Idempotency & Concurrency Testing
+
+**What idempotency means.** Per the HTTP spec, calling the same request N times should leave the system in the same state as calling it once — `GET`, `PUT`, and `DELETE` are supposed to be idempotent; `POST`/`PATCH` generally aren't. Testing it means deliberately repeating a request and asserting the *repeat* behaves the way the spec (and the API's own contract) says it should — not just that a single call works.
+
+**What concurrency means, separately.** Firing multiple requests *at the same time* (via `Promise.all`, not sequential `await`s) and asserting the system handles them consistently — no dropped request, no response leaking another request's payload, no corrupted shared state.
+
+**The wrinkle that makes this file different from a real-world idempotency test.** This project's [Overview](#overview) already establishes that DummyJSON's writes are simulated and nothing persists server-side. That constraint changes what these tests can actually prove:
+
+- **Repeated DELETE, real-world expectation:** against a real backend, deleting an already-deleted resource typically 404s the second time. Against DummyJSON, it doesn't — `DELETE /products/1` called twice returns `200` + `isDeleted: true` **both** times, because there's no persisted "already deleted" state for the second call to check against; each call re-simulates the delete from the same seed data. The test asserts this explicitly, framed as documenting the difference, not as "proving" real idempotency.
+- **Concurrent POST, real-world expectation:** a real backend hands out a unique id to each of several simultaneous creates. DummyJSON hands all of them the **same** id (`current total + 1`), computed statelessly per-request rather than from a persisted counter. The test asserts this too — it's a genuine, useful thing to know about this mock's limits before relying on it for anything id-sensitive.
+- **PUT and concurrent PATCH are the two cases that hold up cleanly** even against a stateless mock, since neither depends on the server remembering anything between calls: the same `PUT` payload sent twice returns byte-identical responses, and simultaneous `PATCH` calls with different payloads each get back exactly their own echoed value, with no cross-talk between them.
+
+**Why this is worth having despite the caveat.** Idempotency and race-condition bugs are a classic "this only shows up in production under real load" failure class — a retried request after a network blip that double-charges a customer, a resubmitted form that creates a duplicate order, a race between two concurrent updates that silently drops one of them. Most portfolio test suites never touch this, because it requires understanding *why* HTTP methods carry idempotency guarantees in the first place, not just what status code a single call returns. Being explicit about what a stateless mock *can't* prove here (real persistence-backed idempotency) is itself part of demonstrating that understanding — a test suite that quietly assumed DummyJSON's DELETE was idempotent, without checking, would be testing the wrong thing.
 
 ## Schema Validation with Zod
 

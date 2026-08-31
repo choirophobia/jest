@@ -35,7 +35,7 @@ describe('Users API', () => {
       });
     });
 
-    it('gets a single user by id', async () => {
+    it('gets a single user by id @smoke', async () => {
       const res = await usersApi.getById(1);
 
       expect(res.status).toBe(200);

@@ -35,7 +35,7 @@ describe('Products API', () => {
       });
     });
 
-    it('gets a single product by id', async () => {
+    it('gets a single product by id @smoke', async () => {
       const res = await productsApi.getById(1);
 
       expect(res.status).toBe(200);

@@ -33,7 +33,7 @@ describe('Posts API', () => {
       });
     });
 
-    it('gets a single post by id', async () => {
+    it('gets a single post by id @smoke', async () => {
       const res = await postsApi.getById(1);
 
       expect(res.status).toBe(200);

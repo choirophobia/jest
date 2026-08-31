@@ -50,7 +50,7 @@ describe('Recipes API', () => {
       });
     });
 
-    it('gets a single recipe by id', async () => {
+    it('gets a single recipe by id @smoke', async () => {
       const res = await recipesApi.getById(1);
 
       expect(res.status).toBe(200);

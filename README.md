@@ -17,6 +17,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Response-Time Assertions](#understanding-response-time-assertions)
 - [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing)
 - [Understanding Idempotency & Concurrency Testing](#understanding-idempotency--concurrency-testing)
+- [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -115,6 +116,9 @@ docker run --rm dummyjson-api-tests
 # Run the entire suite
 npm test
 
+# Run just the smoke subset — a fast, broad health check (see below)
+npm run test:smoke
+
 # Run a single file
 npx jest tests/products.test.js
 
@@ -122,7 +126,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **15 suites / 143 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock).
+Expected result: **15 suites / 143 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -137,6 +141,8 @@ describe('<Resource> API', () => {
   describe('negative cases', () => { ... });
 });
 ```
+
+One test per resource additionally carries an ` @smoke` suffix on its title, marking it as part of the fast subset run by `npm run test:smoke` — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 Tests never call `axios`/`apiClient` directly — they call a **service object** method instead (see below). Underneath that, every service object is built on the shared `apiClient` in `helpers/apiClient.js`, which:
 - Fixes the base URL to `https://dummyjson.com` so calls only reference paths (`/products/1`, not the full URL).
@@ -419,6 +425,29 @@ Every resource's Read block already asserts the *happy-path* pagination shape �
 - **PUT and concurrent PATCH are the two cases that hold up cleanly** even against a stateless mock, since neither depends on the server remembering anything between calls: the same `PUT` payload sent twice returns byte-identical responses, and simultaneous `PATCH` calls with different payloads each get back exactly their own echoed value, with no cross-talk between them.
 
 **Why this is worth having despite the caveat.** Idempotency and race-condition bugs are a classic "this only shows up in production under real load" failure class — a retried request after a network blip that double-charges a customer, a resubmitted form that creates a duplicate order, a race between two concurrent updates that silently drops one of them. Most portfolio test suites never touch this, because it requires understanding *why* HTTP methods carry idempotency guarantees in the first place, not just what status code a single call returns. Being explicit about what a stateless mock *can't* prove here (real persistence-backed idempotency) is itself part of demonstrating that understanding — a test suite that quietly assumed DummyJSON's DELETE was idempotent, without checking, would be testing the wrong thing.
+
+## Understanding Smoke Test Tagging
+
+**The problem this solves.** The full suite takes roughly a minute against the live API. That's fine for a scheduled nightly run or a pre-merge check, but it's the wrong tool for "did I just break something obvious?" — the question you want answered in seconds, not a minute, especially while iterating locally or in a tight CI feedback loop.
+
+**How it's tagged.** Rather than a separate config file or Jest "projects" split, tagging here is a plain naming convention: one existing test per resource — the one that best represents "is this endpoint alive and returning the right shape" — has ` @smoke` appended to its title, in-place, in the same file it already lived in:
+
+```js
+// tests/products.test.js
+it('gets a single product by id @smoke', async () => { ... });
+```
+
+Nine tests carry the tag: a `GET .../{id}` read for products, users, carts, posts, comments, recipes, todos, and quotes, plus auth's login test (the one path where "is the API up" and "is auth working" are the same question). `npm run test:smoke` runs `jest -t "@smoke"`, Jest's built-in test-name filter, which skips every non-matching test without needing a separate file, config, or test runner:
+
+```json
+"test:smoke": "jest -t \"@smoke\""
+```
+
+**Why tag existing tests instead of writing new ones.** A separate `tests/smoke.test.js` duplicating "get product 1, get user 1, …" would mean firing the same live HTTP calls twice — once for the smoke file, once for the real coverage in `products.test.js` — against a shared external API this project has already observed real `429`s from (see [Important Notes & Gotchas](#important-notes--gotchas)). Tagging reuses the exact same request instead of duplicating it — one source of truth per assertion, the same principle the [Service Object Model](#service-object-model-som) is built on.
+
+**The trade-off.** `jest -t` filters individual tests, not whole files or their setup — every test *file* containing a tagged test still loads and its `beforeAll`/`beforeEach` hooks still run (e.g. `auth.test.js`'s own top-level login), even though only one `it` inside it executes. That's a minor, fixed amount of extra setup, not a scaling problem — nine files' worth of hooks, not a fraction of the full 143-test suite's HTTP calls.
+
+**When to reach for `test:smoke` vs. the full suite.** Smoke: a quick "is the live API and our core service objects still working" sanity check — while iterating locally, or as a fast pre-push gate. Full suite: anything that actually needs to verify correctness — CRUD behavior, negative cases, pagination edges, idempotency — which is everything CI and the nightly scheduled run already do, unchanged by this addition.
 
 ## Schema Validation with Zod
 

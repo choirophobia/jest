@@ -2,7 +2,7 @@ const { apiClient } = require('./apiClient');
 
 const productsApi = {
   list: (params) => apiClient.get('/products', { params }),
-  getById: (id) => apiClient.get(`/products/${id}`),
+  getById: (id, config) => apiClient.get(`/products/${id}`, config),
   search: (q) => apiClient.get('/products/search', { params: { q } }),
   byCategory: (category) => apiClient.get(`/products/category/${category}`),
   categories: () => apiClient.get('/products/categories'),

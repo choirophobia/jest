@@ -18,6 +18,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing)
 - [Understanding Idempotency & Concurrency Testing](#understanding-idempotency--concurrency-testing)
 - [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging)
+- [Understanding Response Header Assertions](#understanding-response-header-assertions)
 - [Understanding Contract Drift Detection](#understanding-contract-drift-detection)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
@@ -61,6 +62,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── performance.test.js # Response-time assertions across key endpoints
 │   ├── pagination.test.js # limit/skip boundary and negative-value tests across list endpoints
 │   ├── idempotency.test.js # Repeated-call and parallel-request behavior (DELETE, PUT, concurrent PATCH/POST)
+│   ├── responseHeaders.test.js # Content-Type, CORS, rate-limit, and baseline security headers
 │   └── contractDrift.test.js # Strict-schema checks that catch unexpected/added fields
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
@@ -128,7 +130,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **16 suites / 147 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **17 suites / 154 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -298,6 +300,13 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Concurrent PATCH:** 5 parallel `PATCH /products/1` calls, each with a different payload (fired via `Promise.all`), each resolve with **their own** echoed value — no cross-contamination between simultaneous requests
 - **Concurrent POST:** 3 parallel `POST /products/add` calls all succeed and each echoes its own payload correctly, but all three are handed the **same** simulated `id` — documenting that this mock computes "next id" statelessly per-request rather than persisting a real counter, unlike a production backend under concurrent writes
 
+### Response Headers (`tests/responseHeaders.test.js`)
+- **Not a resource — the full HTTP contract, not just the body.** See [Understanding Response Header Assertions](#understanding-response-header-assertions) below for why this is a separate concern from the body-shape checks the rest of the suite already does.
+- **Content-Type:** a successful read, a `404`, and a successful create all respond `application/json` — confirmed across both success and error paths, not just the happy path
+- **CORS:** sending an explicit `Origin` header gets it echoed back verbatim in `Access-Control-Allow-Origin` (plus `Access-Control-Allow-Credentials: true`); omitting `Origin` (axios in Node never adds one automatically) means `Access-Control-Allow-Origin` is absent entirely — DummyJSON reflects the caller's origin rather than allowing `*`
+- **Rate-limit visibility:** every response carries `X-RateLimit-Limit`/`X-RateLimit-Remaining` — the documented explanation for why this project's negative-case assertions already accept `429` alongside `404`/`400` (see [Important Notes & Gotchas](#important-notes--gotchas))
+- **Baseline security header:** `X-Content-Type-Options: nosniff` is present on every response
+
 ### Contract Drift Detection (`tests/contractDrift.test.js`)
 - **Not a resource — a stricter re-check of contracts the other tests already trust.** See [Understanding Contract Drift Detection](#understanding-contract-drift-detection) below for what this catches that the schema-validated Read tests don't.
 - **Products, users, carts, posts:** `GET /{resource}/{id}` for each is checked against its existing schema (`schemas/productSchema.js`, `userSchema.js`, `cartSchema.js`, `postSchema.js`) called in `.strict()` mode, which fails on any field the schema doesn't declare — not just a field that's missing or the wrong type
@@ -455,6 +464,18 @@ Nine tests carry the tag: a `GET .../{id}` read for products, users, carts, post
 **The trade-off.** `jest -t` filters individual tests, not whole files or their setup — every test *file* containing a tagged test still loads and its `beforeAll`/`beforeEach` hooks still run (e.g. `auth.test.js`'s own top-level login), even though only one `it` inside it executes. That's a minor, fixed amount of extra setup, not a scaling problem — nine files' worth of hooks, not a fraction of the full 143-test suite's HTTP calls.
 
 **When to reach for `test:smoke` vs. the full suite.** Smoke: a quick "is the live API and our core service objects still working" sanity check — while iterating locally, or as a fast pre-push gate. Full suite: anything that actually needs to verify correctness — CRUD behavior, negative cases, pagination edges, idempotency — which is everything CI and the nightly scheduled run already do, unchanged by this addition.
+
+## Understanding Response Header Assertions
+
+**The gap this closes.** Every other test in this suite checks the two things people usually mean by "does the API work": the status code, and the JSON body. Headers are the third piece of an HTTP response, and they carry contract-level information the body never does — what format the body actually is, who's allowed to call this from a browser, and how close the caller is to getting throttled. A suite that never reads `res.headers` is silently trusting all of that, not verifying it.
+
+**What curling the real API with `-D -` (dump headers) turned up:**
+
+1. **`Content-Type: application/json; charset=utf-8` is consistent across both success and error paths** — a `200`, a `404`, and a `201` all carry it. Worth confirming explicitly: a body-only test would still pass if an error response came back as `text/html` instead, since `res.data` would just fail to parse as expected JSON in a way that's easy to misdiagnose as "the body is wrong" rather than "the content type is wrong."
+2. **CORS is dynamic, not a blanket `*`.** DummyJSON reflects whatever `Origin` header the caller sent, verbatim, back in `Access-Control-Allow-Origin` — and omits that header entirely when no `Origin` was sent. This matters because axios running in Node (as every test in this suite does) never adds an `Origin` header on its own the way a browser would; testing CORS here means deliberately setting one, which is why `productsApi.getById` gained an optional second `config` argument (`productsApi.getById(1, { headers: { Origin } })`) rather than the test reaching for `apiClient` directly and breaking the [Service Object Model](#service-object-model-som).
+3. **The rate limit this project has been hitting all along is real and self-documenting.** `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset` are present on every single response. This project's CLAUDE.md notes "no rate limits documented" for DummyJSON — true of the written docs, but the response headers say otherwise, and this project's own negative-case tests already accept `429` alongside `404` as a result (see [Important Notes & Gotchas](#important-notes--gotchas)). Asserting these headers exist turns "we occasionally see 429s and shrug" into "the API tells you exactly how close you are, and we check that it does."
+
+**Why this is worth having beyond DummyJSON specifically.** Header bugs are the kind that don't show up in a body-only test suite at all: a misconfigured CORS policy that silently blocks a legitimate frontend origin, a missing `Content-Type` that makes a strict client refuse to parse a perfectly valid JSON body, a security header (`X-Content-Type-Options: nosniff`) that quietly stops being sent after an infrastructure change. None of those change the status code or the JSON body — they only show up if something is actually reading the headers.
 
 ## Understanding Contract Drift Detection
 

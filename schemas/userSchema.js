@@ -27,6 +27,7 @@ const userSchema = z.object({
   email: z.email(),
   phone: z.string(),
   username: z.string(),
+  password: z.string(),
   birthDate: z.string(),
   image: z.string(),
   bloodGroup: z.string(),
@@ -37,7 +38,9 @@ const userSchema = z.object({
     color: z.string(),
     type: z.string(),
   }),
+  ip: z.string(),
   address: addressSchema,
+  macAddress: z.string(),
   university: z.string(),
   bank: z.object({
     cardExpire: z.string(),
@@ -51,6 +54,14 @@ const userSchema = z.object({
     name: z.string(),
     title: z.string(),
     address: addressSchema,
+  }),
+  ein: z.string(),
+  ssn: z.string(),
+  userAgent: z.string(),
+  crypto: z.object({
+    coin: z.string(),
+    wallet: z.string(),
+    network: z.string(),
   }),
   role: z.string(),
 });

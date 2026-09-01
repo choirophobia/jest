@@ -18,6 +18,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing)
 - [Understanding Idempotency & Concurrency Testing](#understanding-idempotency--concurrency-testing)
 - [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging)
+- [Understanding Contract Drift Detection](#understanding-contract-drift-detection)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -59,7 +60,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── userJourney.test.js # Chained scenario: login → view cart → update → checkout
 │   ├── performance.test.js # Response-time assertions across key endpoints
 │   ├── pagination.test.js # limit/skip boundary and negative-value tests across list endpoints
-│   └── idempotency.test.js # Repeated-call and parallel-request behavior (DELETE, PUT, concurrent PATCH/POST)
+│   ├── idempotency.test.js # Repeated-call and parallel-request behavior (DELETE, PUT, concurrent PATCH/POST)
+│   └── contractDrift.test.js # Strict-schema checks that catch unexpected/added fields
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -126,7 +128,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **15 suites / 143 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **16 suites / 147 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -296,6 +298,11 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Concurrent PATCH:** 5 parallel `PATCH /products/1` calls, each with a different payload (fired via `Promise.all`), each resolve with **their own** echoed value — no cross-contamination between simultaneous requests
 - **Concurrent POST:** 3 parallel `POST /products/add` calls all succeed and each echoes its own payload correctly, but all three are handed the **same** simulated `id` — documenting that this mock computes "next id" statelessly per-request rather than persisting a real counter, unlike a production backend under concurrent writes
 
+### Contract Drift Detection (`tests/contractDrift.test.js`)
+- **Not a resource — a stricter re-check of contracts the other tests already trust.** See [Understanding Contract Drift Detection](#understanding-contract-drift-detection) below for what this catches that the schema-validated Read tests don't.
+- **Products, users, carts, posts:** `GET /{resource}/{id}` for each is checked against its existing schema (`schemas/productSchema.js`, `userSchema.js`, `cartSchema.js`, `postSchema.js`) called in `.strict()` mode, which fails on any field the schema doesn't declare — not just a field that's missing or the wrong type
+- **A real gap this immediately found:** writing this test's `userSchema.strict()` check against the live `/users/{id}` response failed on first run — `password`, `ip`, `macAddress`, `ein`, `ssn`, `userAgent`, and `crypto` are all real fields DummyJSON returns that `schemas/userSchema.js` didn't declare. The schema was updated to include them (verified present across all 208 seed users first) rather than loosening the test — see [Understanding Contract Drift Detection](#understanding-contract-drift-detection) for the full story
+
 ## Understanding Mock HTTP
 
 If this is your first time seeing the term, here's the mental model.
@@ -448,6 +455,24 @@ Nine tests carry the tag: a `GET .../{id}` read for products, users, carts, post
 **The trade-off.** `jest -t` filters individual tests, not whole files or their setup — every test *file* containing a tagged test still loads and its `beforeAll`/`beforeEach` hooks still run (e.g. `auth.test.js`'s own top-level login), even though only one `it` inside it executes. That's a minor, fixed amount of extra setup, not a scaling problem — nine files' worth of hooks, not a fraction of the full 143-test suite's HTTP calls.
 
 **When to reach for `test:smoke` vs. the full suite.** Smoke: a quick "is the live API and our core service objects still working" sanity check — while iterating locally, or as a fast pre-push gate. Full suite: anything that actually needs to verify correctness — CRUD behavior, negative cases, pagination edges, idempotency — which is everything CI and the nightly scheduled run already do, unchanged by this addition.
+
+## Understanding Contract Drift Detection
+
+**What the existing schema checks actually catch — and what they don't.** Every schema in `schemas/` is used with Zod's default object behavior, which is "strip mode": if a response has a field the schema didn't declare, Zod silently ignores it — the check still passes. That means the existing `toMatchSchema(productSchema)` assertions catch a field going **missing** or changing **type**, but they cannot catch a field being **added**. A schema can be quietly out of date with the real API for months without a single test going red.
+
+**The fix: the same schema, called differently, not a second schema.** Zod objects have a `.strict()` method that returns a variant of the same schema where any undeclared key fails validation instead of being ignored:
+
+```js
+expect(res.data).toMatchSchema(productSchema.strict());
+```
+
+This is the entire mechanism — no new library, no snapshot files to review and commit, and critically, no second, parallel definition of "what a product looks like" to keep in sync with the original. `productSchema` (used for type-correctness in `products.test.js`) and `productSchema.strict()` (used for drift detection here) are the exact same source of truth, just invoked in two different modes.
+
+**This immediately found a real bug, not a hypothetical one.** Before writing this test, `GET /users/1` was curled and diffed against `schemas/userSchema.js` by hand (per this project's usual workflow — verify against the live API, don't assume). The live response had 7 fields the schema never declared: `password`, `ip`, `macAddress`, `ein`, `ssn`, `userAgent`, and `crypto` (a wallet/coin/network object). None of those were caught by the existing lenient schema checks, because strip-mode Zod doesn't look for extra fields — this project's user contract had been silently incomplete since `userSchema.js` was first written. The fix was to bring the schema in line with reality (confirming first, via `GET /users?limit=0`, that all 208 seed users consistently have these fields) rather than to loosen the new test — the point of this feature is catching exactly this kind of gap, not working around it.
+
+**Why this is worth having beyond DummyJSON specifically.** A backend silently adding a field is usually harmless — until it isn't: a field that turns out to contain PII nobody flagged for a compliance review, a field a frontend starts depending on informally before it's a documented part of the contract, or simply a schema that's drifted so far from reality that nobody trusts it enough to enforce it strictly anymore. Consumer-driven contract testing (the discipline this technique borrows from — see tools like Pact) exists because "the response still parses" and "the response is what we agreed it would be" are different guarantees, and only the second one prevents silent drift.
+
+**The honest caveat.** DummyJSON is a public API this project doesn't own — there's no one to open an issue with if it adds a field next month, and this test would then need updating rather than the API. The value here isn't that DummyJSON specifically owes this project schema stability; it's demonstrating the technique against a real, live, occasionally-changing API instead of a hypothetical one. Against a first-party API a team actually owns, the same pattern turns into a real safeguard: CI fails the moment a backend change silently breaks the documented contract, instead of a frontend finding out weeks later.
 
 ## Schema Validation with Zod
 

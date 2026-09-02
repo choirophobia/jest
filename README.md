@@ -20,10 +20,12 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging)
 - [Understanding Response Header Assertions](#understanding-response-header-assertions)
 - [Understanding Contract Drift Detection](#understanding-contract-drift-detection)
+- [Understanding sortBy/order and select Query Params](#understanding-sortbyorder-and-select-query-params)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
+- [API Testing Interview Questions & Answers](#api-testing-interview-questions--answers)
 
 ## Overview
 
@@ -63,7 +65,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── pagination.test.js # limit/skip boundary and negative-value tests across list endpoints
 │   ├── idempotency.test.js # Repeated-call and parallel-request behavior (DELETE, PUT, concurrent PATCH/POST)
 │   ├── responseHeaders.test.js # Content-Type, CORS, rate-limit, and baseline security headers
-│   └── contractDrift.test.js # Strict-schema checks that catch unexpected/added fields
+│   ├── contractDrift.test.js # Strict-schema checks that catch unexpected/added fields
+│   └── queryParams.test.js # sortBy/order and select query params across list endpoints
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -130,7 +133,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **17 suites / 154 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **18 suites / 163 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -311,6 +314,11 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Not a resource — a stricter re-check of contracts the other tests already trust.** See [Understanding Contract Drift Detection](#understanding-contract-drift-detection) below for what this catches that the schema-validated Read tests don't.
 - **Products, users, carts, posts:** `GET /{resource}/{id}` for each is checked against its existing schema (`schemas/productSchema.js`, `userSchema.js`, `cartSchema.js`, `postSchema.js`) called in `.strict()` mode, which fails on any field the schema doesn't declare — not just a field that's missing or the wrong type
 - **A real gap this immediately found:** writing this test's `userSchema.strict()` check against the live `/users/{id}` response failed on first run — `password`, `ip`, `macAddress`, `ein`, `ssn`, `userAgent`, and `crypto` are all real fields DummyJSON returns that `schemas/userSchema.js` didn't declare. The schema was updated to include them (verified present across all 208 seed users first) rather than loosening the test — see [Understanding Contract Drift Detection](#understanding-contract-drift-detection) for the full story
+
+### List Query Parameters (`tests/queryParams.test.js`)
+- **Not a resource — two more query params `pagination.test.js` doesn't cover.** See [Understanding sortBy/order and select Query Params](#understanding-sortbyorder-and-select-query-params) below for what curling these up found.
+- **`sortBy`/`order`:** `sortBy=price` alone sorts ascending by default; `order=desc` reverses it; the same params sort a *different* resource (`users` by `age`) correctly too, confirming shared platform behavior — but an unrecognized `sortBy` field is silently ignored (`200`, unsorted) rather than erroring, and an invalid `order` value only triggers a `400` when `sortBy` is also present — `order` alone is a no-op
+- **`select`:** trims the response to just the requested fields, plus `id` (always included, even if not requested); an unrecognized field name is silently ignored, same as `sortBy`; composes correctly with `sortBy`/`order` at the same time — the trimmed shape is still sorted right
 
 ## Understanding Mock HTTP
 
@@ -495,6 +503,22 @@ This is the entire mechanism — no new library, no snapshot files to review and
 
 **The honest caveat.** DummyJSON is a public API this project doesn't own — there's no one to open an issue with if it adds a field next month, and this test would then need updating rather than the API. The value here isn't that DummyJSON specifically owes this project schema stability; it's demonstrating the technique against a real, live, occasionally-changing API instead of a hypothetical one. Against a first-party API a team actually owns, the same pattern turns into a real safeguard: CI fails the moment a backend change silently breaks the documented contract, instead of a frontend finding out weeks later.
 
+## Understanding sortBy/order and select Query Params
+
+**Why these needed their own file instead of living in `pagination.test.js`.** `limit`/`skip` control *how much* of a list comes back and from *where*; `sortBy`/`order` and `select` control the list's *content* — what order it's in, and which fields survive per item. Related query-string mechanism, different concern. Keeping them in a separate file mirrors why `performance.test.js` and `pagination.test.js` are already split apart: each file answers one specific question about the list endpoints, not "everything about `GET /products`."
+
+**Neither param is in this project's own endpoint reference.** `CLAUDE.md`'s Resource Endpoint Reference lists `GET /products`, `/products/{id}`, `/products/search?q=`, `/products/category/{category}`, `/products/categories` — no mention of `sortBy`, `order`, or `select`. They were found the same way everything else non-obvious in this suite was found: reading [DummyJSON's docs](https://dummyjson.com/docs) and then curling the live API to see what actually happens at the edges, not just the documented happy path.
+
+**What curling turned up, and why each finding earned its own assertion:**
+
+1. **`sortBy` alone sorts ascending — `order` isn't required to get a sorted result.** `GET /products?sortBy=price` (no `order` at all) comes back in ascending price order, identical to explicitly passing `order=asc`. Easy to assume `sortBy` without `order` is undefined behavior; it isn't.
+2. **An unrecognized `sortBy` field doesn't error — it's silently ignored.** `GET /products?sortBy=notARealField` still returns `200` with the default (id) ordering, not a `400`. A test that only checked the happy path would never notice a typo'd field name doesn't do anything.
+3. **`order`'s own validation depends on whether `sortBy` is present — a genuinely surprising coupling.** `GET /products?order=sideways` alone is a `200` no-op (there's nothing to apply an invalid order *to*, so the API doesn't bother validating it). Add `sortBy=price` to the same invalid `order` value, and it becomes a `400` with `"Invalid 'order' - should be either 'asc' or 'desc'"`. Two nearly-identical requests, two different outcomes, entirely dependent on a *different* parameter's presence — the kind of coupling that's invisible unless you specifically test both combinations.
+4. **`select` always keeps `id`, even when it's not in the requested field list.** `GET /products?select=title` still returns `{ id, title }`, not just `{ title }`. A client relying on `select` to control the exact key set would be surprised by an extra key showing up unasked.
+5. **An unrecognized `select` field mirrors `sortBy`'s behavior — silently dropped rather than rejected.** `select=notARealField` returns `{ id }` only, not a `400` and not an error field in the body. Consistent with finding #2, which is itself worth knowing: this API's philosophy for unrecognized *field names* (as opposed to unrecognized *parameter values*, like an invalid `order`) is "ignore it," not "reject it."
+
+**Why this matters beyond DummyJSON specifically.** Query-string parameters are exactly the part of an API surface that's easiest to under-test, because the "normal" request (no `sortBy`, no `select`, no `order`) always works — the interesting behavior only shows up in combinations nobody tries by default: a param with no effect until paired with another, a typo that's silently swallowed instead of surfaced, a field that's always present no matter what you ask for. Those are the requests real users' client code eventually sends by accident, and the only way to know how the API handles them is to send them on purpose first.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -606,3 +630,144 @@ It still makes real network calls out to `https://dummyjson.com` — the contain
 - **`GET /2fa` with no `key` query param doesn't return JSON.** It serves the tool's HTML landing page (200, `text/html`) instead of an API error, since the same route doubles as a browser-facing page. `tests/tools.test.js` tests the missing/invalid-key negative cases via `POST` instead, which reliably returns JSON.
 - **This is a practice/portfolio project.** Treat DummyJSON as a dev/testing aid, not production infrastructure — don't build real features on top of assumptions validated only here.
 - **Auth credentials are DummyJSON's published test user** (`emilys` / `emilyspass`), documented at [dummyjson.com/docs/auth](https://dummyjson.com/docs/auth). If DummyJSON ever rotates its seed data, update `VALID_CREDENTIALS` in `tests/auth.test.js`.
+
+## API Testing Interview Questions & Answers
+
+Ten questions an interviewer is likely to ask about API testing specifically — each answered with the general concept first, then how this exact repository demonstrates it, so the answer is backed by real code rather than theory alone.
+
+### 1. What's the difference between API testing and UI (end-to-end) testing?
+
+**Short answer:** API testing calls the service layer directly (HTTP requests in, JSON responses out); UI testing drives the rendered interface (clicks, form fills, visual assertions) that sits on top of that same API.
+
+| | API Testing | UI Testing |
+|---|---|---|
+| **Speed** | Fast — no browser, no rendering | Slow — full browser lifecycle per test |
+| **Flakiness** | Lower — no layout timing, animations, or selectors to break | Higher — brittle selectors, race conditions with rendering |
+| **What it catches** | Contract bugs: wrong status code, wrong field, broken auth, bad pagination | Presentation bugs: a button that's unreachable, a modal that doesn't close, broken CSS |
+| **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
+| **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
+
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 163 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+
+### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
+
+**Short answer:** they differ in how much of the real system is actually running underneath the test.
+
+| | Unit | Integration | E2E |
+|---|---|---|---|
+| **What's real** | Nothing — the function under test, everything else mocked | Some — e.g. a real database, mocked third-party calls | Everything — real backend, real database, real network |
+| **Speed** | Milliseconds | Seconds | Seconds to minutes |
+| **Confidence** | Low — proves the code does what it says, not that it's wired up correctly | Medium — proves components talk to each other correctly | High — proves the whole system actually works, as deployed |
+| **Typical volume** | Thousands | Hundreds | Dozens to low hundreds |
+
+**Example from this project:** every test here is E2E by this definition — `helpers/apiClient.js` makes real HTTP calls to `https://dummyjson.com` with `axios`; nothing is mocked (see [Overview](#overview): "No mocking, no Supertest"). That's a deliberate trade-off documented in this README: higher confidence per test, at the cost of depending on a third party's uptime and rate limits (see [Important Notes & Gotchas](#important-notes--gotchas)).
+
+### 3. How do you decide what counts as a good negative test case?
+
+**Short answer:** a good negative test targets a specific way a client can misuse the API, not just "send garbage and expect a 4xx." The strongest negative tests come from asking: what wrong input is a real client actually likely to send?
+
+**Structure used consistently in this project** (see [Conventions](#conventions)): every resource has, at minimum,
+- an **invalid/out-of-range ID** (`GET /products/999999` → `404`)
+- a **missing required field** (an invalid `auth/login` payload missing `password` → `400`)
+- **invalid auth** (`GET /auth/me` with no token, or a garbage token → `401`)
+
+**Example, and why it's a *good* negative test, not just any negative test:** `tests/pagination.test.js` doesn't just check that `limit=-1` returns an error — it checks *why* it's interesting: `order=sideways` alone is a harmless no-op (`200`), but the exact same invalid value becomes a `400` the moment `sortBy` is also present (see [Understanding sortBy/order and select Query Params](#understanding-sortbyorder-and-select-query-params)). A weak negative test would only try one of those two requests and miss the coupling entirely.
+
+### 4. What is idempotency, and how would you actually test whether an endpoint is idempotent?
+
+**Short answer:** an idempotent operation produces the same *end state* no matter how many times it's repeated. Per the HTTP spec, `GET`, `PUT`, and `DELETE` are supposed to be idempotent; `POST` and `PATCH` generally aren't.
+
+**How to test it, concretely:** call the same request twice (or more) and assert the *repeat* behaves the way the contract says it should — not just that a single call works.
+
+| Method | Real-world idempotent behavior | What to assert on a repeat call |
+|---|---|---|
+| `PUT` | Same input → same output, every time | Second response is byte-identical to the first |
+| `DELETE` | Deleting twice ≠ deleting-then-erroring; typically the 2nd call `404`s | Second call's status/body reflects "already gone" |
+| `POST` (create) | Not idempotent by design | Two calls create two distinct resources with different ids |
+
+**Example from this project, including an honest caveat:** `tests/idempotency.test.js` found that DummyJSON's `DELETE` doesn't behave like a real backend's — calling it twice returns `200` **both** times instead of `404`ing on the second call, because writes aren't persisted (see [Understanding Idempotency & Concurrency Testing](#understanding-idempotency--concurrency-testing)). The test asserts this explicitly, framed as *documenting the difference* from real idempotency rather than assuming it holds.
+
+### 5. What's the difference between schema validation and manual field-by-field assertions — and what is "contract drift"?
+
+**Short answer:** manual assertions (`expect(res.data.title).toBe('...')`) check specific values; schema validation checks the *shape* of the whole response — every field's presence and type — in one declarative pass. Contract drift is what schema validation, in its default lenient mode, *still* can't catch: a field silently **added** to a response that the schema never declared, because most schema libraries ignore unknown keys by default rather than rejecting them.
+
+| | Manual assertions | Lenient schema validation | Strict schema validation |
+|---|---|---|---|
+| Catches wrong value | ✅ | ❌ (unless checked separately) | ❌ (unless checked separately) |
+| Catches missing field | ❌ (only if explicitly checked) | ✅ | ✅ |
+| Catches wrong type | ❌ (only if explicitly checked) | ✅ | ✅ |
+| Catches an unexpected *added* field | ❌ | ❌ | ✅ |
+| Effort per resource | High — one line per field | Low — one schema, reused everywhere | Low — same schema, `.strict()` |
+
+**Example from this project:** `schemas/*.js` (Zod) power `toMatchSchema()` across every resource's Read tests (see [Schema Validation with Zod](#schema-validation-with-zod)). `tests/contractDrift.test.js` reuses those *exact same schemas* in `.strict()` mode specifically to catch additions — and it immediately found a real one: `schemas/userSchema.js` was missing 7 fields DummyJSON actually returns (`password`, `ip`, `macAddress`, `ein`, `ssn`, `userAgent`, `crypto`), see [Understanding Contract Drift Detection](#understanding-contract-drift-detection). That's the difference in practice, not just in theory.
+
+### 6. How do you test pagination, and what edge cases matter most?
+
+**Short answer:** the happy path (page 1, default size, plenty of data) is the least interesting part. The bugs live at the edges: the first page, the last (partial) page, an empty result set, and boundary values like `0` or negative numbers.
+
+**Edge cases worth covering, in order of how often real bugs hide there:**
+1. A **partial last page** — requesting more items than remain (off-by-one errors love this case)
+2. **`limit`/`skip` at their boundary values** — `0`, negative, non-numeric
+3. **An empty result set** — does `total` still reflect the real collection size, or does it also go to `0`?
+4. Whether the API's **metadata fields** (`limit`, `total`) describe the request or the actual response — these are not always the same thing
+
+**Example from this project:** `tests/pagination.test.js` found that DummyJSON's `limit=0` doesn't mean "zero results" — it means "no limit, return everything." It also found that the response's `limit` field always echoes the *actual* page size returned, not the requested one (a `limit=10` request with only 3 items left comes back reporting `"limit": 3`). See [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing) for the full breakdown — neither behavior is guessable from the happy path alone.
+
+### 7. How do you handle authentication and authorization in automated API tests?
+
+**Short answer:** authenticate once per test run (or per file) via a real login call, capture the token, and inject it into subsequent requests — never hardcode a long-lived token in the test code itself.
+
+**The usual shape:**
+```js
+beforeAll(async () => {
+  const res = await authApi.login(VALID_CREDENTIALS);
+  accessToken = res.data.accessToken;
+});
+
+it('accesses a protected route', async () => {
+  const res = await authApi.me(accessToken);
+  expect(res.status).toBe(200);
+});
+```
+
+**What to test beyond "login works":** a protected route with no token (`401`), with a garbage/malformed token (`401`), and — if the API supports it — the token refresh flow itself.
+
+**Example from this project:** `tests/auth.test.js` does exactly this, and `tests/userJourney.test.js` goes a step further by chaining the token through multiple resources in one session (login → `/auth/me` → `/users/{id}` → `/carts/user/{userId}`), which catches a different bug class than isolated auth tests can: whether the `id` returned by login actually matches the `id` used consistently elsewhere. See [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud).
+
+### 8. What's the difference between a smoke test suite and a full regression suite, and when do you use each?
+
+**Short answer:** a smoke suite answers "is the system obviously broken?" in seconds; a regression suite answers "is the system actually correct?" and takes proportionally longer because it has to.
+
+| | Smoke suite | Full regression suite |
+|---|---|---|
+| **Question it answers** | Is anything obviously on fire? | Is behavior actually correct, including edge cases? |
+| **Size** | A handful of critical-path checks | Every CRUD operation, every negative case, every edge case |
+| **Speed** | Seconds | Minutes |
+| **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
+| **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
+
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~163 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+
+### 9. Why test response headers, not just the status code and body?
+
+**Short answer:** the status code and body are only two-thirds of an HTTP response. Headers carry contract-level information neither of the other two express: what format the body actually is, who's allowed to call this cross-origin, and how close a caller is to being throttled.
+
+**Headers worth asserting on, and why each matters:**
+- **`Content-Type`** — a client that strictly parses JSON will fail confusingly if an error response comes back as `text/html` instead; this is easy to misdiagnose as "the body is wrong" when it's actually "the content type is wrong"
+- **CORS headers** (`Access-Control-Allow-Origin`, `-Credentials`) — determine whether a legitimate frontend origin can even read the response at all; a misconfiguration here breaks browsers silently
+- **Rate-limit headers** (`X-RateLimit-*`) — tell a well-behaved client how close it is to being throttled, before it happens
+- **Baseline security headers** (`X-Content-Type-Options: nosniff`, etc.) — regressions here don't change the status code or body at all, so nothing else would catch them
+
+**Example from this project:** `tests/responseHeaders.test.js` found that DummyJSON's rate limit — undocumented in its written docs — is actually self-documented in its own response headers (`x-ratelimit-limit` is present on every single call). That's the real, concrete explanation for why this project's own negative-case tests already tolerate `429` alongside `404` (see [Understanding Response Header Assertions](#understanding-response-header-assertions)) — a fact that was sitting in the headers the whole time, unread until this test went looking.
+
+### 10. How do you deal with a flaky or rate-limited third-party API in CI?
+
+**Short answer:** first, make the flakiness *visible and attributable* (don't let a `429` masquerade as a real assertion failure); second, decide deliberately whether to tolerate it, retry it, or slow down to avoid it — rather than silently ignoring red CI runs.
+
+**Options, roughly in order of effort:**
+1. **Tolerate the known status in the assertion itself** — e.g. `expect([404, 429]).toContain(res.status)` — cheapest, but only appropriate when you've confirmed *why* the alternate status happens
+2. **Retry with backoff** at the HTTP client level, so a transient `429` doesn't fail the test at all
+3. **Serialize requests** (`--runInBand` in Jest) to reduce burst load against a shared rate limit
+4. **Re-run the CI job** when a failure is confirmed transient, rather than treating it as a real regression
+
+**Example from this project — a real incident, not a hypothetical:** while building and merging several of the PRs behind this suite, CI genuinely failed on `429`s from DummyJSON's shared rate limiter — confirmed by reading the actual response bodies in the CI logs, not assumed. The fix each time was re-running the job once the burst passed, and `products.test.js`'s negative-case assertions already accept `[404, 429]` for exactly this reason (see [Important Notes & Gotchas](#important-notes--gotchas)). The stronger fix — an actual retry/backoff layer in `helpers/apiClient.js` — is a known, identified gap in this suite, not yet built.

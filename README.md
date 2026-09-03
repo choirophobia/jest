@@ -21,6 +21,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Response Header Assertions](#understanding-response-header-assertions)
 - [Understanding Contract Drift Detection](#understanding-contract-drift-detection)
 - [Understanding sortBy/order and select Query Params](#understanding-sortbyorder-and-select-query-params)
+- [Understanding Cross-Resource Referential Integrity](#understanding-cross-resource-referential-integrity)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -66,7 +67,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── idempotency.test.js # Repeated-call and parallel-request behavior (DELETE, PUT, concurrent PATCH/POST)
 │   ├── responseHeaders.test.js # Content-Type, CORS, rate-limit, and baseline security headers
 │   ├── contractDrift.test.js # Strict-schema checks that catch unexpected/added fields
-│   └── queryParams.test.js # sortBy/order and select query params across list endpoints
+│   ├── queryParams.test.js # sortBy/order and select query params across list endpoints
+│   └── referentialIntegrity.test.js # Cross-resource foreign-key-style checks (category, userId, postId, productId)
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -133,7 +135,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **18 suites / 163 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **19 suites / 169 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -319,6 +321,14 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Not a resource — two more query params `pagination.test.js` doesn't cover.** See [Understanding sortBy/order and select Query Params](#understanding-sortbyorder-and-select-query-params) below for what curling these up found.
 - **`sortBy`/`order`:** `sortBy=price` alone sorts ascending by default; `order=desc` reverses it; the same params sort a *different* resource (`users` by `age`) correctly too, confirming shared platform behavior — but an unrecognized `sortBy` field is silently ignored (`200`, unsorted) rather than erroring, and an invalid `order` value only triggers a `400` when `sortBy` is also present — `order` alone is a no-op
 - **`select`:** trims the response to just the requested fields, plus `id` (always included, even if not requested); an unrecognized field name is silently ignored, same as `sortBy`; composes correctly with `sortBy`/`order` at the same time — the trimmed shape is still sorted right
+
+### Referential Integrity (`tests/referentialIntegrity.test.js`)
+- **Not a resource — a check on the seed dataset itself, not on any one endpoint.** See [Understanding Cross-Resource Referential Integrity](#understanding-cross-resource-referential-integrity) below for why this is a different failure class than every other file in this suite catches.
+- **Products → categories:** every `product.category` returned by `GET /products?limit=0` actually exists in `GET /products/categories`
+- **Posts → users:** every `post.userId` resolves to a real user id from `GET /users?limit=0`
+- **Comments → posts, comments → users:** every `comment.postId` resolves to a real post; every `comment.user.id` resolves to a real user
+- **Carts → users, carts → products:** every `cart.userId` resolves to a real user; every product `id` referenced inside a cart's `products[]` resolves to a real product
+- **All six checks run off exactly 6 HTTP calls total** — every list is fetched once with `limit=0` in a `beforeAll`, and every check afterward is an in-memory `Set` lookup, not a network call
 
 ## Understanding Mock HTTP
 
@@ -519,6 +529,16 @@ This is the entire mechanism — no new library, no snapshot files to review and
 
 **Why this matters beyond DummyJSON specifically.** Query-string parameters are exactly the part of an API surface that's easiest to under-test, because the "normal" request (no `sortBy`, no `select`, no `order`) always works — the interesting behavior only shows up in combinations nobody tries by default: a param with no effect until paired with another, a typo that's silently swallowed instead of surfaced, a field that's always present no matter what you ask for. Those are the requests real users' client code eventually sends by accident, and the only way to know how the API handles them is to send them on purpose first.
 
+## Understanding Cross-Resource Referential Integrity
+
+**The failure class every other file in this suite structurally cannot catch.** Every other test file validates one endpoint in isolation: does `GET /posts/{id}` return the right shape, the right status code, the right echoed value on a write? None of that can ever notice if `post.userId` points at a user that doesn't exist — because a single-resource test never looks at any resource *other* than the one it's calling. This is the same gap [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud) identified for a live *session* (does data flow correctly between endpoints during one user's journey); this file asks the same kind of question about the *static seed dataset* instead: is it internally consistent, foreign-key-style, everywhere at once?
+
+**What "referential integrity" means here, concretely.** In a relational database, a foreign key constraint guarantees `posts.userId` can never contain a value that isn't a real row in `users`. A REST API backed by a real database usually gets that guarantee for free, enforced at the data layer. This suite doesn't have access to DummyJSON's database — so instead of trusting that guarantee exists, it verifies the *observable result* holds: every `post.userId` in the API's responses actually corresponds to a real user the API also returns. Same idea, checked from the outside, six ways: products↔categories, posts↔users, comments↔posts, comments↔users, carts↔users, carts↔products.
+
+**Why this is efficient instead of expensive.** The naive version of this test — for every post, `GET /users/{post.userId}` and check it's `200` — would mean one HTTP call per item: 251 calls just for posts, before touching comments or carts. Against an API this project has already been rate-limited by more than once (see [Important Notes & Gotchas](#important-notes--gotchas)), that's not just slow, it's actively hostile to the thing you're testing against. Instead, this file leans on a fact [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing) already established: `limit=0` returns an entire collection in one request. Fetch every list once (6 calls total, run in parallel via `Promise.all` in a single `beforeAll`), build a `Set` of valid ids from each, and every "does this id exist" check afterward is an in-memory lookup — zero additional network calls no matter how large the dataset gets.
+
+**Why this is worth having beyond DummyJSON specifically.** Referential integrity bugs are invisible to per-endpoint testing by construction, and they're exactly the kind of bug that slips through code review too — a migration that soft-deletes users without cleaning up their posts, a data import that assigns an off-by-one user id, a cache that serves a stale post referencing an already-deleted author. None of those break any single endpoint's contract; they only show up when you specifically check that the *edges between* resources still point somewhere real.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -647,7 +667,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 163 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 169 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -746,7 +766,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~163 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~169 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

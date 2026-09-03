@@ -21,6 +21,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Response Header Assertions](#understanding-response-header-assertions)
 - [Understanding Contract Drift Detection](#understanding-contract-drift-detection)
 - [Understanding sortBy/order and select Query Params](#understanding-sortbyorder-and-select-query-params)
+- [Understanding Auth Token Edge Cases](#understanding-auth-token-edge-cases)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -66,7 +67,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── idempotency.test.js # Repeated-call and parallel-request behavior (DELETE, PUT, concurrent PATCH/POST)
 │   ├── responseHeaders.test.js # Content-Type, CORS, rate-limit, and baseline security headers
 │   ├── contractDrift.test.js # Strict-schema checks that catch unexpected/added fields
-│   └── queryParams.test.js # sortBy/order and select query params across list endpoints
+│   ├── queryParams.test.js # sortBy/order and select query params across list endpoints
+│   └── authTokenEdgeCases.test.js # Tampered JWTs, malformed refresh tokens, expiresInMins behavior
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -133,7 +135,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **18 suites / 163 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **19 suites / 169 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -221,6 +223,13 @@ const res = await productsApi.getById(id);
 - **Protected route:** `GET /auth/me` with a valid Bearer token (200, checks `id`/`email`/`address`/`company`/`role` shape), no token (401), invalid token (401) — both rejections check the `message` body is a string
 - **Refresh:** `POST /auth/refresh` with a valid refresh token (200, new tokens match JWT shape), missing token (401 with a `message` body)
 - **Negative:** wrong password (400), missing required field (400), unknown username (400) — all three check a `message` body is present and that no `accessToken` leaks into an error response
+
+### Auth Token Edge Cases (`tests/authTokenEdgeCases.test.js`)
+- **Not a resource — deeper coverage of `auth`'s own edge cases.** See [Understanding Auth Token Edge Cases](#understanding-auth-token-edge-cases) below for why these are distinct from `auth.test.js`'s existing negative cases.
+- **Tampered JWT:** a syntactically valid three-segment token with a garbage signature returns `500` with an `"invalid signature"` message — not `401` like every other invalid-token case, a real inconsistency found by testing it directly
+- **Missing `Bearer` scheme:** an `Authorization` header with a raw value and no `Bearer ` prefix → `401`
+- **Invalid (not just missing) refresh token:** a garbage, non-JWT refresh token value → `403`, distinct from `auth.test.js`'s *missing* refresh token case, which is `401`
+- **`expiresInMins`:** a custom lifetime (`1`) produces a token whose `exp - iat` is exactly that many minutes; omitting the field entirely defaults to 1 hour; **explicitly passing `expiresInMins: 0`** is treated as falsy and produces a 30-day token instead of an immediate expiry — the intuitive "0 means now" reading is wrong, the same shape of surprise as `limit=0` meaning "no limit" in [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing)
 
 ### Carts (`tests/carts.test.js`)
 - **Create:** `POST /carts/add` — tied to a `userId`, echoes `products[]` (id/quantity per line item), checks `totalProducts`/`totalQuantity` match the payload
@@ -519,6 +528,19 @@ This is the entire mechanism — no new library, no snapshot files to review and
 
 **Why this matters beyond DummyJSON specifically.** Query-string parameters are exactly the part of an API surface that's easiest to under-test, because the "normal" request (no `sortBy`, no `select`, no `order`) always works — the interesting behavior only shows up in combinations nobody tries by default: a param with no effect until paired with another, a typo that's silently swallowed instead of surfaced, a field that's always present no matter what you ask for. Those are the requests real users' client code eventually sends by accident, and the only way to know how the API handles them is to send them on purpose first.
 
+## Understanding Auth Token Edge Cases
+
+**Why `auth.test.js`'s existing negative cases weren't enough.** `auth.test.js` already tests "no token" and `"not-a-real-token"` against `/auth/me` (both `401`), plus a missing refresh token against `/auth/refresh` (`401`). Those are the *obvious* invalid-auth cases — the ones any checklist would name. `tests/authTokenEdgeCases.test.js` goes one level deeper, into the cases that only show up once you start asking "invalid *how*, exactly?" instead of just "invalid."
+
+**What curling turned up, and why each one is a distinct case, not a repeat of an existing one:**
+
+1. **A tampered JWT is not the same kind of "invalid" as a garbage string, and DummyJSON treats it differently.** `"not-a-real-token"` isn't shaped like a JWT at all — three dot-separated segments — so it's an easy, cheap rejection. A syntactically valid JWT (real header, real payload, garbage signature) has to actually go through *signature verification* to be rejected, and when it fails there, DummyJSON returns `500` with `"invalid signature"` — not the `401` every other invalid-token case gets. That's a real inconsistency in the API's own error handling, and it's invisible unless you specifically construct a JWT-shaped-but-wrong token rather than just any garbage string.
+2. **A missing `Bearer` scheme is a different failure than a missing token entirely.** Testing this required extending `authApi` with `meWithAuthorizationHeader()` — a raw-value variant alongside the existing `me(token)`, which always prepends `Bearer ` itself — because a client that forgets the scheme prefix (a genuinely common integration bug) sends a *present* but malformed header, not an *absent* one.
+3. **An invalid refresh token and a missing refresh token are different failures with different status codes.** `auth.test.js` covers "no refresh token provided" (`401`). A refresh token that's present but garbage returns `403` instead — a different branch of the API's own logic, only reachable by sending a token-shaped value that isn't one.
+4. **`expiresInMins` has a real, working effect on token lifetime — and a real, surprising edge case.** Decoding the JWT payload (no library needed — just base64url-decoding the middle segment) confirms `exp - iat` tracks the requested value exactly (`expiresInMins: 1` → a 60-second-lived token). Omitting the field defaults to 1 hour. But explicitly passing `expiresInMins: 0` does **not** mean "expires immediately" — `0` is falsy, so the server's `expiresInMins || <default>` logic falls through to a 30-day token instead. The intuitive reading of an explicit `0` is exactly backwards, the same shape of surprise as `limit=0` meaning "no limit, not zero" in [Understanding Pagination Boundary Testing](#understanding-pagination-boundary-testing).
+
+**Why this is worth having beyond DummyJSON specifically.** "Reject bad auth" is the checklist item every test suite has; "reject bad auth *correctly*, with the right status code for the right reason" is the part that actually matters to a real client. A frontend that retries on `401` but not `403` will misbehave against DummyJSON's own refresh-token endpoint, silently, unless someone tested both cases separately. The falsy-zero footgun on `expiresInMins` is a broader lesson too: any API param that's documented as "a number" deserves an explicit test for its falsy value (`0`), not just a normal one — `0`, empty string, and `false` all collapse to "not provided" in a naive `value || default` check, which is an extremely common server-side bug pattern, not a DummyJSON-specific one.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -647,7 +669,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 163 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 169 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -746,7 +768,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~163 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~169 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

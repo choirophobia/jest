@@ -39,9 +39,15 @@ jobs:
 
       - name: Notify Discord
         if: always()
+        continue-on-error: true
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "::warning::DISCORD_WEBHOOK_URL secret is not set — skipping Discord notification. Test results above are unaffected."
+            exit 0
+          fi
+
           if [ "${{ steps.parse.outputs.success }}" = "true" ]; then
             STATUS="PASSED ✅"
             COLOR=3066993

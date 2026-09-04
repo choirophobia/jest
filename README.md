@@ -23,6 +23,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding sortBy/order and select Query Params](#understanding-sortbyorder-and-select-query-params)
 - [Understanding Cross-Resource Referential Integrity](#understanding-cross-resource-referential-integrity)
 - [Understanding Auth Token Edge Cases](#understanding-auth-token-edge-cases)
+- [Understanding Malformed ID Path Parameters](#understanding-malformed-id-path-parameters)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -70,7 +71,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── contractDrift.test.js # Strict-schema checks that catch unexpected/added fields
 │   ├── queryParams.test.js # sortBy/order and select query params across list endpoints
 │   ├── referentialIntegrity.test.js # Cross-resource foreign-key-style checks (category, userId, postId, productId)
-│   └── authTokenEdgeCases.test.js # Tampered JWTs, malformed refresh tokens, expiresInMins behavior
+│   ├── authTokenEdgeCases.test.js # Tampered JWTs, malformed refresh tokens, expiresInMins behavior
+│   └── malformedIdParams.test.js # Non-numeric/decimal/negative id path params across every resource
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -137,7 +139,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **20 suites / 175 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **21 suites / 191 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -338,6 +340,12 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Comments → posts, comments → users:** every `comment.postId` resolves to a real post; every `comment.user.id` resolves to a real user
 - **Carts → users, carts → products:** every `cart.userId` resolves to a real user; every product `id` referenced inside a cart's `products[]` resolves to a real product
 - **All six checks run off exactly 6 HTTP calls total** — every list is fetched once with `limit=0` in a `beforeAll`, and every check afterward is an in-memory `Set` lookup, not a network call
+
+### Malformed ID Path Parameters (`tests/malformedIdParams.test.js`)
+- **Not a resource — every resource's negative-ID coverage taken one level deeper.** See [Understanding Malformed ID Path Parameters](#understanding-malformed-id-path-parameters) below for the cross-resource inconsistency this found.
+- **A non-numeric id (`abc`) across all 8 resources:** `users` and `posts` validate the id's format before lookup and return `400` with `"Invalid <resource> id 'abc'"`; `products`, `carts`, `comments`, `recipes`, `todos`, and `quotes` don't validate at all — they treat it exactly like a well-formed-but-missing id and return `404`
+- **Format validation (or its absence) is consistent across GET/PUT/DELETE** for a given resource — checked explicitly on `users` (validates, `400` on all three) and `products` (doesn't, `404` on all three)
+- **Malformed-but-numeric-looking ids** (`1.5`, `-1`, `01`, `1e5`, `0`, a 20-digit integer) on a non-validating resource all safely return `404`, each echoing the exact malformed value back in the message — no crash, no injection concern, no inconsistent handling across formats
 
 ## Understanding Mock HTTP
 
@@ -561,6 +569,27 @@ This is the entire mechanism — no new library, no snapshot files to review and
 
 **Why this is worth having beyond DummyJSON specifically.** "Reject bad auth" is the checklist item every test suite has; "reject bad auth *correctly*, with the right status code for the right reason" is the part that actually matters to a real client. A frontend that retries on `401` but not `403` will misbehave against DummyJSON's own refresh-token endpoint, silently, unless someone tested both cases separately. The falsy-zero footgun on `expiresInMins` is a broader lesson too: any API param that's documented as "a number" deserves an explicit test for its falsy value (`0`), not just a normal one — `0`, empty string, and `false` all collapse to "not provided" in a naive `value || default` check, which is an extremely common server-side bug pattern, not a DummyJSON-specific one.
 
+## Understanding Malformed ID Path Parameters
+
+**The gap in the existing negative-case coverage.** Every resource's negative-case block already tests an invalid ID — but every single one of them uses `999999` (see `NON_EXISTENT_ID` across `products.test.js`, `users.test.js`, etc.): a **well-formed** number, just one that happens not to exist. That tests exactly one failure mode: "the id is the right shape, but nothing's there." It says nothing about what happens when the id isn't even the right *shape* — a string, a decimal, a negative number, a leading zero. Those are different code paths in most backends (does the router even attempt a lookup, or does something reject the value first?), and `999999` can never exercise them.
+
+**What curling every resource with `abc` as the id turned up — a real, verified cross-resource inconsistency:**
+
+| Resource | `GET /{resource}/abc` | Behavior |
+|---|---|---|
+| `users` | `400` — `"Invalid user id 'abc'"` | Validates the id is numeric *before* attempting a lookup |
+| `posts` | `400` — `"Invalid post id 'abc'"` | Same — validates first |
+| `products` | `404` — `"Product with id 'abc' not found"` | No validation — attempts the lookup, `abc` just doesn't match anything |
+| `carts`, `comments`, `recipes`, `todos`, `quotes` | `404` (same pattern) | Same as `products` — no validation |
+
+Two resources out of eight — `users` and `posts` — validate the id's format and fail fast with a `400` that says *why*. The other six skip validation entirely and let a non-numeric id fall through to the same "not found" path a merely-out-of-range numeric id would take, indistinguishable in the response. Neither approach is wrong on its own — but having *both*, undocumented, in the same API is exactly the kind of inconsistency that trips up a client written against one resource's behavior and then reused against another.
+
+**Confirmed consistent across methods, not just GET.** The same split holds for `PUT`/`DELETE`, checked explicitly on both a validating resource (`users` — `400` on all three verbs) and a non-validating one (`products` — `404` on all three) — so this isn't a `GET`-specific quirk, it's the resource's general approach to id handling.
+
+**Why the malformed-but-numeric-looking cases matter too.** `1.5`, `-1`, `01`, `1e5`, `0`, and a 20-digit integer are all things a naive client-side id (an autoincrement counter that overflowed, a float from bad type coercion, a copy-pasted scientific-notation number) could plausibly produce by accident. Every one of them, on a non-validating resource like `products`, safely returns `404` with the exact malformed value echoed back in the message — proof the API doesn't crash, doesn't misinterpret them as a different id, and doesn't leak anything unexpected when handed a value nobody explicitly coded for.
+
+**Why this is worth having beyond DummyJSON specifically.** Path parameter validation is an easy thing to get inconsistent across a codebase — one endpoint added early validates its id with `parseInt` and a NaN check, a newer endpoint copy-pasted from a different pattern just does `array.find(id)` and lets a bad id fall through to "not found." Both are defensible in isolation; the bug is when a system has both and nobody wrote down which is which. Testing every resource with the exact same malformed input, side by side, is what makes an inconsistency like this visible instead of just implicitly assumed.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -689,7 +718,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 175 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 191 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -788,7 +817,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~175 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~191 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

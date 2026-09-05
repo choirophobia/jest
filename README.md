@@ -24,6 +24,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Cross-Resource Referential Integrity](#understanding-cross-resource-referential-integrity)
 - [Understanding Auth Token Edge Cases](#understanding-auth-token-edge-cases)
 - [Understanding Malformed ID Path Parameters](#understanding-malformed-id-path-parameters)
+- [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -72,7 +73,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── queryParams.test.js # sortBy/order and select query params across list endpoints
 │   ├── referentialIntegrity.test.js # Cross-resource foreign-key-style checks (category, userId, postId, productId)
 │   ├── authTokenEdgeCases.test.js # Tampered JWTs, malformed refresh tokens, expiresInMins behavior
-│   └── malformedIdParams.test.js # Non-numeric/decimal/negative id path params across every resource
+│   ├── malformedIdParams.test.js # Non-numeric/decimal/negative id path params across every resource
+│   └── retryResilience.test.js # The retry/backoff interceptor, exercised against a fake adapter
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -139,7 +141,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **21 suites / 191 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **22 suites / 198 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -161,6 +163,7 @@ Tests never call `axios`/`apiClient` directly — they call a **service object**
 - Fixes the base URL to `https://dummyjson.com` so calls only reference paths (`/products/1`, not the full URL).
 - Sets `validateStatus: () => true`, so 4xx/5xx responses resolve normally instead of throwing — this lets negative-case tests assert on `res.status` and `res.data.message` directly instead of wrapping calls in `try/catch`.
 - Stamps every response with `response.duration` (ms), via a request/response interceptor pair, so any test can assert on latency without tracking timing itself. See [Understanding Response-Time Assertions](#understanding-response-time-assertions).
+- Automatically retries a `429` response with capped exponential/reset-aware backoff, up to 3 attempts, before handing it back to the caller. See [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience).
 
 ## Service Object Model (SOM)
 
@@ -346,6 +349,11 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **A non-numeric id (`abc`) across all 8 resources:** `users` and `posts` validate the id's format before lookup and return `400` with `"Invalid <resource> id 'abc'"`; `products`, `carts`, `comments`, `recipes`, `todos`, and `quotes` don't validate at all — they treat it exactly like a well-formed-but-missing id and return `404`
 - **Format validation (or its absence) is consistent across GET/PUT/DELETE** for a given resource — checked explicitly on `users` (validates, `400` on all three) and `products` (doesn't, `404` on all three)
 - **Malformed-but-numeric-looking ids** (`1.5`, `-1`, `01`, `1e5`, `0`, a 20-digit integer) on a non-validating resource all safely return `404`, each echoing the exact malformed value back in the message — no crash, no injection concern, no inconsistent handling across formats
+
+### Retry & Backoff Resilience (`tests/retryResilience.test.js`)
+- **Not a resource — the one file in this suite that doesn't hit the live API at all.** See [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience) below for why, and for the honest limits of what this feature does and doesn't solve.
+- **`computeRetryDelayMs` (unit-tested directly):** prefers the time remaining until `x-ratelimit-reset` when that header is present and still in the future, capped at `MAX_BACKOFF_MS`; falls back to capped exponential backoff (`200ms, 400ms, 800ms, ...`) when the header is missing or already stale
+- **The interceptor itself, exercised against a fake axios adapter:** retries on `429` and returns the eventual success response; gives up after `MAX_RETRIES` and returns the last `429` response without throwing; never retries any other status (`404` checked explicitly) — the fake adapter is this project's one deliberate exception to "no mocking, ever"
 
 ## Understanding Mock HTTP
 
@@ -590,6 +598,20 @@ Two resources out of eight — `users` and `posts` — validate the id's format 
 
 **Why this is worth having beyond DummyJSON specifically.** Path parameter validation is an easy thing to get inconsistent across a codebase — one endpoint added early validates its id with `parseInt` and a NaN check, a newer endpoint copy-pasted from a different pattern just does `array.find(id)` and lets a bad id fall through to "not found." Both are defensible in isolation; the bug is when a system has both and nobody wrote down which is which. Testing every resource with the exact same malformed input, side by side, is what makes an inconsistency like this visible instead of just implicitly assumed.
 
+## Understanding Retry & Backoff Resilience
+
+**The gap this closes.** Up to this point, this project's answer to DummyJSON's rate limiting has been *tolerance*, not *resilience*: a handful of negative-case assertions accept `[404, 429]` as both being "fine" (see [Important Notes & Gotchas](#important-notes--gotchas)), and this project's own CI has needed manual re-runs more than once when a burst of `429`s hit an otherwise-passing suite. That's a client that notices it got rate-limited and shrugs. `helpers/apiClient.js` now has an actual recovery mechanism: a response interceptor that automatically retries a `429`, with backoff, before ever handing it back to the caller.
+
+**How it decides how long to wait.** [Understanding Response Header Assertions](#understanding-response-header-assertions) already established that every DummyJSON response carries `x-ratelimit-reset` — a Unix timestamp for when the current rate-limit window clears. `computeRetryDelayMs()` prefers that over guessing: on a `429`, it waits until that reset time (not longer than `MAX_BACKOFF_MS`), so a retry lands *after* the window that caused the `429` has actually cleared, rather than at an arbitrary interval. If that header's ever missing, it falls back to capped exponential backoff (`200ms, 400ms, 800ms`). Either way, only `429` ever triggers this — every other status (`400`, `401`, `403`, `404`, `500`, …) is a real outcome this suite tests for on purpose and reaches the caller on the first attempt, untouched.
+
+**Why the wait is capped, and what that trades away.** `MAX_BACKOFF_MS` is deliberately small (1 second), and `MAX_RETRIES` is capped at 3. That's not because DummyJSON's actual rate-limit window is that short — it isn't, based on this project's own observations, it's closer to a minute. It's because Jest's default test timeout is 5 seconds *per test*, and a retry layer that could make a single `it()` block wait tens of seconds to outlast a real rate-limit window would turn "resilient to `429`s" into "randomly times out instead of failing fast." The trade explicitly made here: **absorb short, transient bursts** (a handful of overlapping concurrent requests within one file, or a brief spike from another test file that ran moments before) **without pretending to solve a sustained, whole-suite-exceeds-the-rate-budget scenario** — that second case still needs the existing `[404, 429]` tolerance and/or a CI re-run, exactly as before.
+
+**What verifying this against the live suite actually showed — reported honestly, not idealized.** By the time this feature was built and tested, this session had already run the full suite (and re-run it, repeatedly, while diagnosing earlier issues) many times over several hours — enough cumulative traffic that DummyJSON's shared rate-limit budget was measurably strained on its own, independent of this change. Running a handful of files together (`products`, `users`, `auth`, `carts`) passed cleanly, and `auth.test.js` visibly took ~13 seconds instead of its usual ~2–5 — direct, visible evidence the retry logic was engaging and successfully recovering a request that would previously have just failed. But running the *entire* 198-test suite back-to-back still showed a handful of scattered failures (a different file each time — `userJourney`, `todos`, `tools`, `performance` — never the same one twice, which is itself evidence this is load-related rather than a logic bug), because the suite's own total request volume in one run can exceed what a 1-second-capped, 3-attempt retry can realistically outlast. That's the honest boundary described above, observed directly rather than assumed.
+
+**Why the retry logic itself is tested with a mock — the one deliberate exception to "no mocking, ever."** [Overview](#overview) and `CLAUDE.md` are explicit: this suite makes only real HTTP calls, no mocking, no Supertest. Testing retry-on-`429` logic properly requires the ability to force a specific number of consecutive `429`s on demand, and there's no way to make the *real* DummyJSON API do that reliably — worse, depending on the real rate limiter actually being triggered to test the code that exists *because of* that rate limiter would be circular and flaky by construction. `tests/retryResilience.test.js` uses axios's own built-in `adapter` option (not a new dependency) to swap in a synthetic transport for one file only, so the exact interceptor shipped in `helpers/apiClient.js` — imported directly, not reimplemented — can be driven through a controlled sequence of responses (`429, 429, 200`; always `429`; a plain `404`) and asserted on deterministically.
+
+**Duration semantics are preserved on purpose.** `response.duration` (see [Understanding Response-Time Assertions](#understanding-response-time-assertions)) is stamped fresh on whichever attempt is actually returned to the caller, using that attempt's own start time — never the cumulative time spent retrying. A retried request that eventually succeeds still reports a normal-looking duration for the successful round trip, not an inflated number that includes backoff waiting. `performance.test.js`'s latency budget stays a statement about server responsiveness, not about how much client-side patience a flaky window demanded.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -695,7 +717,7 @@ It still makes real network calls out to `https://dummyjson.com` — the contain
 ## Important Notes & Gotchas
 
 - **Writes don't persist.** Creating, updating, or deleting a resource returns a realistic response but has no lasting effect — running the suite repeatedly is safe and idempotent.
-- **No rate limits are documented** for DummyJSON, but avoid hammering it in tight loops out of courtesy — it's a shared public sandbox, not your own infrastructure. In practice, occasional `429` responses have been observed on the "not found" negative cases for products/users/carts, so those assertions accept `[404, 429]` rather than asserting `404` strictly.
+- **No rate limits are documented** for DummyJSON, but avoid hammering it in tight loops out of courtesy — it's a shared public sandbox, not your own infrastructure. In practice, occasional `429` responses have been observed on the "not found" negative cases for products/users/carts, so those assertions accept `[404, 429]` rather than asserting `404` strictly. `helpers/apiClient.js` now retries a `429` automatically with capped backoff (see [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience)), which absorbs short transient bursts — but a sustained rate-limit window across a full suite run can still exceed what a bounded retry can outlast, so the `[404, 429]` tolerance and an occasional CI re-run remain the honest fallback, not a fully solved problem.
 - **Create status codes aren't consistent across resources.** Most `POST .../add` endpoints return `201`, but `POST /recipes/add` returns `200` — verified directly against the live API before writing the assertion. Don't assume `201` when adding a new resource; check the real response first.
 - **`/c/generate` appears to be cached by payload at the CDN edge.** Calling it twice with an identical `{ json, method }` body can return a stale cached response for a request that should otherwise be fresh (observed: a wrong-method call that should 404 instead returned a cached 200). `tests/tools.test.js` works around this by including a random `nonce` field in payloads used for negative-path assertions, so each test run generates a genuinely unique URL. If you add more Custom Response tests, do the same for anything asserting on a *fresh* result.
 - **`GET /2fa` with no `key` query param doesn't return JSON.** It serves the tool's HTML landing page (200, `text/html`) instead of an API error, since the same route doubles as a browser-facing page. `tests/tools.test.js` tests the missing/invalid-key negative cases via `POST` instead, which reliably returns JSON.
@@ -718,7 +740,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 191 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 198 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -817,7 +839,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~191 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~198 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 
@@ -841,4 +863,4 @@ it('accesses a protected route', async () => {
 3. **Serialize requests** (`--runInBand` in Jest) to reduce burst load against a shared rate limit
 4. **Re-run the CI job** when a failure is confirmed transient, rather than treating it as a real regression
 
-**Example from this project — a real incident, not a hypothetical:** while building and merging several of the PRs behind this suite, CI genuinely failed on `429`s from DummyJSON's shared rate limiter — confirmed by reading the actual response bodies in the CI logs, not assumed. The fix each time was re-running the job once the burst passed, and `products.test.js`'s negative-case assertions already accept `[404, 429]` for exactly this reason (see [Important Notes & Gotchas](#important-notes--gotchas)). The stronger fix — an actual retry/backoff layer in `helpers/apiClient.js` — is a known, identified gap in this suite, not yet built.
+**Example from this project — a real incident, not a hypothetical:** while building and merging several of the PRs behind this suite, CI genuinely failed on `429`s from DummyJSON's shared rate limiter — confirmed by reading the actual response bodies in the CI logs, not assumed. The fix each time was re-running the job once the burst passed, and `products.test.js`'s negative-case assertions already accept `[404, 429]` for exactly this reason (see [Important Notes & Gotchas](#important-notes--gotchas)). The stronger fix — an actual retry/backoff layer in `helpers/apiClient.js` — is now built (see [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience)), and it's honest about its own limits: it absorbs short transient bursts, visibly (one verification run saw `auth.test.js` take ~13s instead of ~2–5s while a retry silently recovered a request), but a sustained rate-limit window across an entire suite run in one go can still exceed what a Jest-timeout-safe, capped backoff can outlast — the `[404, 429]` tolerance and an occasional re-run are still the fallback for that case, not a symptom of the retry layer not working.

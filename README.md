@@ -25,6 +25,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Auth Token Edge Cases](#understanding-auth-token-edge-cases)
 - [Understanding Malformed ID Path Parameters](#understanding-malformed-id-path-parameters)
 - [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience)
+- [Understanding HTTP Request Semantics](#understanding-http-request-semantics)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -74,7 +75,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── referentialIntegrity.test.js # Cross-resource foreign-key-style checks (category, userId, postId, productId)
 │   ├── authTokenEdgeCases.test.js # Tampered JWTs, malformed refresh tokens, expiresInMins behavior
 │   ├── malformedIdParams.test.js # Non-numeric/decimal/negative id path params across every resource
-│   └── retryResilience.test.js # The retry/backoff interceptor, exercised against a fake adapter
+│   ├── retryResilience.test.js # The retry/backoff interceptor, exercised against a fake adapter
+│   └── httpRequestSemantics.test.js # Malformed requests, not responses — wrong Content-Type, duplicate query params
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -101,7 +103,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── cartSchema.js      # Zod contract for a cart item
 │   └── postSchema.js      # Zod contract for a post item
 ├── jest.setup.js          # Registers the custom `toMatchSchema` / `toRespondWithin` matchers
-├── jest.config.js         # Points Jest at jest.setup.js + configures the HTML report
+├── jest.config.js         # Points Jest at jest.setup.js, configures the HTML report, sets a 10s test timeout
 ├── report/                # Generated HTML test report (gitignored, not committed)
 ├── Dockerfile              # Container image that runs the suite via `npm test`
 ├── .dockerignore
@@ -141,7 +143,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **22 suites / 198 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **23 suites / 202 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -354,6 +356,11 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Not a resource — the one file in this suite that doesn't hit the live API at all.** See [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience) below for why, and for the honest limits of what this feature does and doesn't solve.
 - **`computeRetryDelayMs` (unit-tested directly):** prefers the time remaining until `x-ratelimit-reset` when that header is present and still in the future, capped at `MAX_BACKOFF_MS`; falls back to capped exponential backoff (`200ms, 400ms, 800ms, ...`) when the header is missing or already stale
 - **The interceptor itself, exercised against a fake axios adapter:** retries on `429` and returns the eventual success response; gives up after `MAX_RETRIES` and returns the last `429` response without throwing; never retries any other status (`404` checked explicitly) — the fake adapter is this project's one deliberate exception to "no mocking, ever"
+
+### HTTP Request Semantics (`tests/httpRequestSemantics.test.js`)
+- **Not a resource — malformed *requests*, the mirror image of the malformed *responses* every other file tests.** See [Understanding HTTP Request Semantics](#understanding-http-request-semantics) below for the two real quirks this found.
+- **A wrong `Content-Type` silently drops the request body — no error, no rejection:** `POST /products/add` returns `201` with a bare `{ id }` and no `title`; `POST /users/add` returns `201` with a fully-shaped user where every field is blank (`""`/`null`), not the values sent; `PUT /products/{id}` returns `200` with the *original* record completely unchanged — three different-looking symptoms, same root cause, checked across all three
+- **A duplicate query parameter breaks validation outright:** `GET /products?limit=5&limit=50` returns `400` ("Invalid 'limit'..."), not "first wins" or "last wins" — the repeated key parses as an array, which fails the positive-number check entirely
 
 ## Understanding Mock HTTP
 
@@ -612,6 +619,28 @@ Two resources out of eight — `users` and `posts` — validate the id's format 
 
 **Duration semantics are preserved on purpose.** `response.duration` (see [Understanding Response-Time Assertions](#understanding-response-time-assertions)) is stamped fresh on whichever attempt is actually returned to the caller, using that attempt's own start time — never the cumulative time spent retrying. A retried request that eventually succeeds still reports a normal-looking duration for the successful round trip, not an inflated number that includes backoff waiting. `performance.test.js`'s latency budget stays a statement about server responsiveness, not about how much client-side patience a flaky window demanded.
 
+**A real side effect this feature surfaced, fixed rather than worked around.** Rolling this out revealed that Jest's default 5000ms per-test timeout assumed a single request per test — a reasonable assumption before retries existed. Once a request could legitimately take up to ~4 round trips (1 original + 3 retries) plus up to ~1.4s of cumulative backoff, an existing, unrelated test (`products.test.js`'s Create test, on a cold connection) started failing on a plain timeout rather than any real assertion. The fix was `testTimeout: 10000` in `jest.config.js` — raised with margin specifically because *this* feature changed how long a single request can legitimately take, not because any individual test got slower to write or slower to run under normal conditions.
+
+## Understanding HTTP Request Semantics
+
+**The blind spot this closes.** Every other file in this suite tests malformed *responses* — wrong status codes, unexpected fields, missing headers. None of them test a malformed *request* — what happens when the client itself gets something wrong on the way out, before the server's business logic even runs. Curling a request with a deliberately wrong `Content-Type` header, and one with a duplicated query parameter, turned up two real, verified quirks neither of which shows up anywhere else in this suite.
+
+**Finding #1: a wrong `Content-Type` doesn't reject the request — it silently discards the body.** Sending a perfectly valid JSON string as the body, but declaring it as `Content-Type: text/plain` (exactly what a client that forgot to set the header, or a proxy that stripped it, would produce), doesn't produce a `400` anywhere. Instead, each write endpoint quietly proceeds as if an empty body had been sent, and the *symptom* differs by resource in a way that's worth seeing side by side:
+
+| Endpoint | Response | What actually happened |
+|---|---|---|
+| `POST /products/add` | `201`, `{ "id": 195 }` | Only the generated `id` comes back — every field from the (unparsed) payload is simply absent |
+| `POST /users/add` | `201`, a full user object | Every field is present but blank (`""`, `null`) — the handler filled in a complete shape from nothing, rather than omitting fields like `products/add` did |
+| `PUT /products/{id}` | `200`, the original record | The existing seed data comes back completely unchanged — an update that silently didn't update anything |
+
+All three return a success status. None of them say "your body wasn't understood." A client that forgets this one header gets what looks like a normal, successful response and only discovers the problem later, indirectly — through absent or blank fields it expected to have set, which is a materially worse failure mode than a clear `400` would be.
+
+**Testing this required a genuine axios subtlety.** Passing a plain JS object as the payload with a `Content-Type` override doesn't reproduce this: axios's default request transform still JSON-serializes a plain object and effectively manages the `Content-Type` itself for that data shape. Reproducing what a real misconfigured client sends requires passing an *already-stringified* JSON string as the body (`JSON.stringify(payload)`) — axios passes a string through unchanged — combined with the explicit wrong header. `productsApi.create`/`update` and `usersApi.create` gained an optional `config` parameter (mirroring the pattern already used for `productsApi.getById`'s CORS test) so this could be done through the service objects rather than reaching for `apiClient` directly.
+
+**Finding #2: a duplicate query parameter doesn't pick a winner — it breaks validation entirely.** `GET /products?limit=5&limit=50` returns `400` — `"Invalid 'limit' - should be a positive number"`. Many APIs handle a repeated key by silently taking the first or the last value; this one parses the repeated `limit` into an array, and the positive-number check that normally validates `limit` fails outright against an array instead of a number. A client bug that accidentally appends the same query param twice (common with URL-building helpers that append rather than set) doesn't degrade gracefully here — it fails the whole request.
+
+**Why this is worth having beyond DummyJSON specifically.** Request-side validation gaps are a different, arguably more dangerous class of bug than response-side ones: a bad *response* is visible immediately, in the test or in a browser's network tab. A silently-dropped *request* body looks successful at every layer that isn't specifically checking whether the data actually landed — the exact shape of bug that survives code review and shows up as "why is this user's profile empty" days later, traced back to a proxy or a client library that changed the `Content-Type` header along the way.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -740,7 +769,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 198 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 202 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -839,7 +868,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~198 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~202 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

@@ -23,14 +23,37 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Fails fast, with one clear message, instead of burning through this
+      # suite's 200+ requests only to produce a wall of confusing 429s if
+      # DummyJSON is already down or its rate-limit budget is already low.
+      # See Understanding the CI Health Pre-check.
+      - name: Check DummyJSON health before running the suite
+        id: health
+        run: |
+          RESPONSE=$(curl -s -D - -o /dev/null -w "\nHTTP_STATUS:%{http_code}" https://dummyjson.com/test)
+          STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
+          REMAINING=$(echo "$RESPONSE" | grep -i "^x-ratelimit-remaining:" | tr -d '\r' | cut -d: -f2 | tr -d ' ')
+
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::DummyJSON is unreachable (GET /test returned HTTP $STATUS) — aborting before running ~200+ requests against a service that's currently down."
+            exit 1
+          fi
+
+          echo "DummyJSON is reachable. Rate-limit remaining: ${REMAINING:-unknown}/100"
+
+          if [ -n "$REMAINING" ] && [ "$REMAINING" -lt 20 ]; then
+            echo "::warning::DummyJSON's rate-limit budget is already low ($REMAINING/100 remaining) before this run has even started. Expect possible 429s during this run — helpers/apiClient.js's retry/backoff layer will absorb short bursts, but a low starting budget makes a sustained shortfall more likely."
+          fi
+
       - name: Run Jest tests
         id: jest
+        if: steps.health.outcome == 'success'
         run: npx jest --json --outputFile=jest-results.json
         continue-on-error: true
 
       - name: Parse Jest results
         id: parse
-        if: always()
+        if: steps.health.outcome == 'success'
         run: |
           echo "passed=$(jq '.numPassedTests' jest-results.json)" >> "$GITHUB_OUTPUT"
           echo "failed=$(jq '.numFailedTests' jest-results.json)" >> "$GITHUB_OUTPUT"
@@ -38,7 +61,7 @@ jobs:
           echo "success=$(jq '.success' jest-results.json)" >> "$GITHUB_OUTPUT"
 
       - name: Notify Discord
-        if: always()
+        if: always() && steps.health.outcome == 'success'
         continue-on-error: true
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

@@ -26,6 +26,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Malformed ID Path Parameters](#understanding-malformed-id-path-parameters)
 - [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience)
 - [Understanding HTTP Request Semantics](#understanding-http-request-semantics)
+- [Understanding the ID-in-Body Bug](#understanding-the-id-in-body-bug)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Conventions](#conventions)
@@ -76,7 +77,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── authTokenEdgeCases.test.js # Tampered JWTs, malformed refresh tokens, expiresInMins behavior
 │   ├── malformedIdParams.test.js # Non-numeric/decimal/negative id path params across every resource
 │   ├── retryResilience.test.js # The retry/backoff interceptor, exercised against a fake adapter
-│   └── httpRequestSemantics.test.js # Malformed requests, not responses — wrong Content-Type, duplicate query params
+│   ├── httpRequestSemantics.test.js # Malformed requests, not responses — wrong Content-Type, duplicate query params
+│   └── idFieldInRequestBody.test.js # A body id that "wins" over the URL id on some resources, is rejected on others
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -143,7 +145,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **23 suites / 202 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **24 suites / 215 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -361,6 +363,12 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Not a resource — malformed *requests*, the mirror image of the malformed *responses* every other file tests.** See [Understanding HTTP Request Semantics](#understanding-http-request-semantics) below for the two real quirks this found.
 - **A wrong `Content-Type` silently drops the request body — no error, no rejection:** `POST /products/add` returns `201` with a bare `{ id }` and no `title`; `POST /users/add` returns `201` with a fully-shaped user where every field is blank (`""`/`null`), not the values sent; `PUT /products/{id}` returns `200` with the *original* record completely unchanged — three different-looking symptoms, same root cause, checked across all three
 - **A duplicate query parameter breaks validation outright:** `GET /products?limit=5&limit=50` returns `400` ("Invalid 'limit'..."), not "first wins" or "last wins" — the repeated key parses as an array, which fails the positive-number check entirely
+
+### ID Field in Request Body (`tests/idFieldInRequestBody.test.js`)
+- **Not a resource — a payload shape every other Update test in this suite avoids on purpose.** See [Understanding the ID-in-Body Bug](#understanding-the-id-in-body-bug) below for the two distinct, verified behaviors this found.
+- **`products`, `carts`, `recipes`, `comments`, `todos`:** a numeric `id` in a `PUT` body — even one numerically equal to the URL's id — returns `404`, because it's compared against the URL's id as a string; the identical request succeeds if `id` is sent as a matching string, or omitted entirely (the idiomatic way every other test in this suite already calls these endpoints)
+- **`users`, `posts`:** the opposite bug — the body's `id`, not the URL's, decides which record is actually read and returned; `PUT /posts/1` with `id: 2` in the body returns post 2's data, not post 1's
+- **`DELETE` ignores any `id` in the body entirely, on every resource** — confirmed on `products`: a mismatched body id has no effect, the URL's id is always what's deleted
 
 ## Understanding Mock HTTP
 
@@ -641,6 +649,20 @@ All three return a success status. None of them say "your body wasn't understood
 
 **Why this is worth having beyond DummyJSON specifically.** Request-side validation gaps are a different, arguably more dangerous class of bug than response-side ones: a bad *response* is visible immediately, in the test or in a browser's network tab. A silently-dropped *request* body looks successful at every layer that isn't specifically checking whether the data actually landed — the exact shape of bug that survives code review and shows up as "why is this user's profile empty" days later, traced back to a proxy or a client library that changed the `Content-Type` header along the way.
 
+## Understanding the ID-in-Body Bug
+
+**The realistic client pattern that found this.** Every Update test elsewhere in this suite sends a payload built from scratch, without an `id` field — the idiomatic way to call `PUT /{resource}/{id}`, since the id is already in the URL. But a very common real-world pattern is "fetch the resource, mutate one field client-side, `PUT` the whole object back" — React forms, admin panels, and ORM-style client SDKs all do this constantly. That payload naturally still carries the `id` field the `GET` response came with, because nobody strips it out before resubmitting. Testing *that* path — not the idiomatic one — found two distinct, real bugs.
+
+**Bug #1 (`products`, `carts`, `recipes`, `comments`, `todos`): a numeric body `id` that equals the URL id still 404s.** The likely cause, inferred from the pattern of results rather than DummyJSON's source: the URL's id arrives as a string (`req.params.id` in Express is always a string), and it's compared against the body's `id` with strict equality. A JSON body's `id` field is naturally a *number* — real ids in this API are numbers everywhere else — so `1 === '1'` is `false`, and the request 404s as if the resource didn't exist, even though it plainly does. The proof this is exactly what's happening: sending `id: '1'` as an explicit **string** in the body succeeds, and omitting `id` entirely succeeds — the *only* thing that fails is a numeric id, which is the one form every real client would naturally produce.
+
+**Bug #2 (`users`, `posts`): the opposite problem — the body id silently overrides the URL id.** Here, a mismatched body `id` doesn't 404 at all (unless the id genuinely doesn't exist) — it changes *which record the request actually operates on*. `PUT /users/1` with `{ id: 2, firstName: '...' }` in the body returns user 2's data, not user 1's, with no indication the URL was effectively ignored. In a real system where the URL id is what an authorization check is keyed on ("can this caller modify user `:id`?"), this pattern is the shape of an IDOR-style bug: the security check validates one id while the actual operation silently uses another.
+
+**Two different bugs from the same root habit, and neither is caught by testing the idiomatic call.** Every existing negative-case and update test in this suite calls these endpoints the "correct" way — no `id` in the body — so none of them could have surfaced either behavior; both required deliberately testing the payload shape a real client is likely to send anyway, not the payload shape a clean test *should* send.
+
+**Why `DELETE` is unaffected.** `DELETE /products/1` with a mismatched `id` in the request body still deletes product 1 — confirmed explicitly. `DELETE` requests don't typically carry a semantically meaningful body in the first place, and this API's `DELETE` handlers apparently never look at one; the URL id is the only thing that matters. That's the one method where the id-in-body question doesn't apply at all, which is worth knowing precisely because it's the exception, not because it's expected.
+
+**Why this is worth having beyond DummyJSON specifically.** Both bugs share a cause: an endpoint accepting the same field (`id`) from two different sources (the URL and the body) without a single, explicit rule for which one wins when they disagree — or silently trusting the one an author didn't expect a client to send. That's a common, easy-to-introduce class of bug in any REST API with resource ids in both the path and the payload, and it's specifically invisible to a test suite that only ever sends the "obviously correct" request shape.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -769,7 +791,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 202 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 215 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -868,7 +890,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~202 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~215 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

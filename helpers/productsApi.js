@@ -13,7 +13,7 @@ const productsApi = {
   create: (payload, config) => apiClient.post('/products/add', payload, config),
   update: (id, payload, config) => apiClient.put(`/products/${id}`, payload, config),
   patch: (id, payload) => apiClient.patch(`/products/${id}`, payload),
-  remove: (id) => apiClient.delete(`/products/${id}`),
+  remove: (id, config) => apiClient.delete(`/products/${id}`, config),
 };
 
 module.exports = { productsApi };

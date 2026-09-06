@@ -29,6 +29,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding the ID-in-Body Bug](#understanding-the-id-in-body-bug)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
+- [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
 - [API Testing Interview Questions & Answers](#api-testing-interview-questions--answers)
@@ -723,12 +724,35 @@ expected value to match the provided schema, but it didn't:
 
 **What's set up here — two separate workflows, two separate jobs:**
 
-- **`.github/workflows/ci.yml`** — runs on every `push` and `pull_request` targeting `main`. This is the "did this change break anything" check: install dependencies (`npm ci`), run `npm test`. If any test fails, the workflow fails, and that shows up as a red ✗ right on the pull request — the same signal you'd see on any real engineering team's PR checks.
+- **`.github/workflows/ci.yml`** — runs on every `push` and `pull_request` targeting `main`. This is the "did this change break anything" check: install dependencies (`npm ci`), check DummyJSON is actually healthy, run `npm test`. If any test fails, the workflow fails, and that shows up as a red ✗ right on the pull request — the same signal you'd see on any real engineering team's PR checks.
 - **`.github/workflows/daily-jest-tests.yml`** — runs once a day on a schedule (plus an on-demand "Run workflow" button), independent of any code change. This isn't checking *your* changes — it's checking whether the suite still passes against DummyJSON *right now*, since DummyJSON is a live external API that could change its responses or go down without anyone touching this repo. It posts a pass/fail summary to a Discord webhook, so a break gets noticed without anyone having to go look. This needs a `DISCORD_WEBHOOK_URL` secret configured in the repo settings to actually post; without it, the test run itself still works, only the notification step fails.
+- **Both workflows run the same DummyJSON health pre-check before the suite itself** — see [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check).
 
 **Why two workflows instead of one.** They're answering different questions. "Did my change break the suite?" needs to run fast and block bad merges — that's `push`/`pull_request`. "Is the suite still healthy against a live third-party API I don't control?" needs to run on a timer regardless of whether anyone touched the code — that's `schedule`. Bolting the daily/Discord logic onto the push/PR trigger would mean every PR check also posts a Discord notification, which is noisy and not what either workflow is for.
 
 **Why this matters for a portfolio project specifically.** Tests that only run when a human remembers to run them locally are much weaker than tests that run automatically — CI is what turns "I wrote tests" into "these tests are actually enforced." It's also one of the fastest, lowest-effort things to point to in an interview: a green checkmark on a PR is a concrete, verifiable signal that doesn't require anyone to trust a claim.
+
+## Understanding the CI Health Pre-check
+
+**The real, lived problem this solves.** This exact project has hit DummyJSON's rate limit repeatedly and visibly during its own development — locally, in CI, and while verifying several of the features documented above (see [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience) and [Important Notes & Gotchas](#important-notes--gotchas)). The failure mode is always the same shape: the full suite fires ~200+ requests, some fraction of them land on an already-exhausted rate-limit window, and the run finishes several minutes later with a handful of confusing, scattered `429` failures — different test each time, no single obvious cause in the log. Someone has to read *several* failures and recognize the `429` pattern themselves before they understand what actually happened.
+
+**What the pre-check does instead.** Both `ci.yml` and `daily-jest-tests.yml` now run a **"Check DummyJSON health before running the suite"** step immediately after installing dependencies, before `npm test` ever runs:
+
+```bash
+RESPONSE=$(curl -s -D - -o /dev/null -w "\nHTTP_STATUS:%{http_code}" https://dummyjson.com/test)
+STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
+REMAINING=$(echo "$RESPONSE" | grep -i "^x-ratelimit-remaining:" | tr -d '\r' | cut -d: -f2 | tr -d ' ')
+```
+
+One cheap request to DummyJSON's `/test` endpoint (a trivial `{"status":"ok","method":"GET"}` liveness check — not otherwise used anywhere in the Jest suite itself) does double duty: its status code proves DummyJSON is actually reachable at all, and its `x-ratelimit-remaining` header (already relied on elsewhere — see [Understanding Response Header Assertions](#understanding-response-header-assertions) and [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience)) reveals how much rate-limit budget is left *before* the real suite spends any of it.
+
+**Two distinct outcomes, two distinct responses:**
+- **DummyJSON is unreachable entirely** (a non-`200` from `/test`) — the step exits `1` immediately. Every downstream step (`Run Jest tests`, `Upload test report artifact`, `Parse Jest results`, `Notify Discord`) is skipped via `if: steps.health.outcome == 'success'`, so the job fails in a couple of seconds with **one** clear `::error::` annotation at the very top of the log, instead of the full suite grinding through several minutes of every single test failing against a dead API.
+- **DummyJSON is reachable but its budget is already low** (`x-ratelimit-remaining` under 20) — the check doesn't abort. It posts a `::warning::` annotation and lets the suite run anyway, because a low-but-nonzero budget doesn't guarantee failure (and the retry/backoff layer exists precisely to absorb short shortfalls). The value here is purely diagnostic: if `429`s do show up further down the log, whoever's reading already has the answer at the top, instead of having to reverse-engineer it from scattered failures.
+
+**A deliberate choice: this never silently skips real test execution.** An easy, tempting version of this feature would be "if unhealthy, skip the tests and report green" — but that would hide genuine problems behind a false-positive checkmark, which is worse than a clear, honest failure. This pre-check only ever *fails fast* (on total unreachability) or *warns and proceeds* (on a low budget) — it never turns a run that should be red into one that looks green.
+
+**Why this is a plain `curl` step and not a dedicated monitoring service.** Third-party options exist for this class of problem — synthetic uptime monitors, dedicated CI health-gate services — but they mean a new account, a new integration, and a new thing that can itself be misconfigured (this project already has one integration, the Discord webhook, currently broken exactly that way — see [Important Notes & Gotchas](#important-notes--gotchas)). A `curl` call reusing infrastructure this project already depends on (DummyJSON itself, its own documented rate-limit headers) needed no new account, no new secret, and no new failure mode to manage.
 
 ### Live test report (GitHub Pages)
 

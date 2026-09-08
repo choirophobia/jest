@@ -6,6 +6,7 @@ const todosApi = {
   random: () => apiClient.get('/todos/random'),
   create: (payload) => apiClient.post('/todos/add', payload),
   update: (id, payload) => apiClient.put(`/todos/${id}`, payload),
+  patch: (id, payload) => apiClient.patch(`/todos/${id}`, payload),
   remove: (id) => apiClient.delete(`/todos/${id}`),
 };
 

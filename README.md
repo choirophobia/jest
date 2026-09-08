@@ -28,6 +28,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding HTTP Request Semantics](#understanding-http-request-semantics)
 - [Understanding the ID-in-Body Bug](#understanding-the-id-in-body-bug)
 - [Understanding HTTP Conditional Caching](#understanding-http-conditional-caching)
+- [Understanding Falsy Value Handling on Updates](#understanding-falsy-value-handling-on-updates)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check)
@@ -81,7 +82,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── retryResilience.test.js # The retry/backoff interceptor, exercised against a fake adapter
 │   ├── httpRequestSemantics.test.js # Malformed requests, not responses — wrong Content-Type, duplicate query params
 │   ├── idFieldInRequestBody.test.js # A body id that "wins" over the URL id on some resources, is rejected on others
-│   └── conditionalCaching.test.js # ETag / If-None-Match — 304 on a match, 200 on a stale/wrong one
+│   ├── conditionalCaching.test.js # ETag / If-None-Match — 304 on a match, 200 on a stale/wrong one
+│   └── falsyValueUpdates.test.js # null/"" on update: silently ignored on most resources, applied on todos
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -148,7 +150,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **25 suites / 220 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **26 suites / 225 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -379,6 +381,11 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **A stale or wrong `If-None-Match` returns `200`** with the full, real body, not a cached/stale one
 - **The same resource produces an identical `ETag` across independent fetches** — confirmed directly, since the whole mechanism above only works if the `ETag` is a stable fingerprint of unchanged content, not something regenerated per response
 - **A wildcard `If-None-Match: *`** (meaning "match any current representation") also returns `304`
+
+### Falsy Value Handling on Updates (`tests/falsyValueUpdates.test.js`)
+- **Not a resource — a follow-up to `expiresInMins: 0` in Understanding Auth Token Edge Cases.** See [Understanding Falsy Value Handling on Updates](#understanding-falsy-value-handling-on-updates) below.
+- **`products`, `users`:** `PATCH` with `title: null`, `title: ""`, or `price: null` all leave the original value untouched — the field is silently skipped, not set to `null`/empty; a nested `null` (`address.city`) is skipped the same way, while sibling nested fields still deep-merge correctly around it
+- **`todos` is the exception:** `PATCH /todos/1` with `completed: null` actually sets the field to `null` — the same falsy value that's ignored elsewhere is applied here
 
 ## Understanding Mock HTTP
 
@@ -685,6 +692,16 @@ All three return a success status. None of them say "your body wasn't understood
 
 **Why this is worth having beyond DummyJSON specifically.** Conditional caching is table-stakes HTTP that a surprising number of real backends implement incorrectly or not at all — a stale `ETag` that never invalidates (serving outdated data forever), one that's regenerated on every request (never actually caching anything, as feared above), or one that's simply never checked server-side (a client faithfully sends `If-None-Match` and the server ignores it, always returning `200`). Testing this directly is cheap and answers a question a response-shape assertion never touches: not just "is the data right," but "does this API's caching contract actually do what caching is for."
 
+## Understanding Falsy Value Handling on Updates
+
+**The bug class, stated once, generally.** Server-side code that decides whether to apply an incoming field with a check like `if (value)` or `payload.field || existing.field` treats `null`, `""`, `0`, and `false` all the same way as "not provided" — even when a client sent one of them *on purpose*, specifically to clear a field or turn something off. [Understanding Auth Token Edge Cases](#understanding-auth-token-edge-cases) already found one instance of this — `expiresInMins: 0` falls through to a 30-day token instead of an immediate expiry. This file asks the same question about ordinary resource updates: if a client `PATCH`es a field to `null` or `""`, does that actually happen?
+
+**What testing it found: it depends which resource you ask.** `PATCH /products/1` with `title: null` leaves the title exactly as it was — the field is silently skipped, not nulled out. The same is true for `title: ""` (an explicit empty string, not just `null`) and for `price: null`. `PATCH /users/1` with a nested `{ address: { city: null } }` skips just the `city` key while every sibling nested field (`postalCode`, `country`, etc.) still deep-merges correctly around it — confirming this is a value-level check on `city` specifically, not a failure of the nested merge itself (see [Schema Validation with Zod](#schema-validation-with-zod) for how thoroughly the shape of these objects is otherwise validated). But `PATCH /todos/1` with `completed: null` **does** apply it — the field actually becomes `null` in the response. The exact same falsy value, sent the exact same way, is silently dropped on one resource and honestly applied on another.
+
+**Why this is a real, practical problem and not just a curiosity.** A client trying to implement "clear this field" as `PATCH { title: null }` will believe it succeeded — the response is `200`, no error, nothing indicates the request was ineffective — while the field silently keeps its old value. That's a worse failure mode than a `400`: a `400` at least tells the client something went wrong. Silent no-ops on falsy input are notoriously hard to catch in manual testing too, precisely because the "does this normally work" happy-path check (`PATCH` with a real, truthy value) always passes — the bug only shows up for the one class of input nobody thinks to try until they specifically need to send it.
+
+**Why this is worth having beyond DummyJSON specifically.** `value || default` and `if (value) update()` are extremely common patterns in real backend code, and both share this exact blind spot. Testing a resource's falsy-value handling once, explicitly, is cheap; discovering it in production is a support ticket that starts with "I cleared this field and it didn't save" — the same failure mode as the `expiresInMins: 0` bug, in a place a lot more real systems actually have this exact field-update pattern.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -836,7 +853,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 220 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 225 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -935,7 +952,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~220 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~225 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

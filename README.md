@@ -27,6 +27,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience)
 - [Understanding HTTP Request Semantics](#understanding-http-request-semantics)
 - [Understanding the ID-in-Body Bug](#understanding-the-id-in-body-bug)
+- [Understanding HTTP Conditional Caching](#understanding-http-conditional-caching)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check)
@@ -79,7 +80,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── malformedIdParams.test.js # Non-numeric/decimal/negative id path params across every resource
 │   ├── retryResilience.test.js # The retry/backoff interceptor, exercised against a fake adapter
 │   ├── httpRequestSemantics.test.js # Malformed requests, not responses — wrong Content-Type, duplicate query params
-│   └── idFieldInRequestBody.test.js # A body id that "wins" over the URL id on some resources, is rejected on others
+│   ├── idFieldInRequestBody.test.js # A body id that "wins" over the URL id on some resources, is rejected on others
+│   └── conditionalCaching.test.js # ETag / If-None-Match — 304 on a match, 200 on a stale/wrong one
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -146,7 +148,7 @@ npx jest tests/products.test.js
 npx jest --watch
 ```
 
-Expected result: **24 suites / 215 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **25 suites / 220 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -370,6 +372,13 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **`products`, `carts`, `recipes`, `comments`, `todos`:** a numeric `id` in a `PUT` body — even one numerically equal to the URL's id — returns `404`, because it's compared against the URL's id as a string; the identical request succeeds if `id` is sent as a matching string, or omitted entirely (the idiomatic way every other test in this suite already calls these endpoints)
 - **`users`, `posts`:** the opposite bug — the body's `id`, not the URL's, decides which record is actually read and returned; `PUT /posts/1` with `id: 2` in the body returns post 2's data, not post 1's
 - **`DELETE` ignores any `id` in the body entirely, on every resource** — confirmed on `products`: a mismatched body id has no effect, the URL's id is always what's deleted
+
+### HTTP Conditional Caching (`tests/conditionalCaching.test.js`)
+- **Not a resource — HTTP caching semantics, untested by every other file in this suite.** See [Understanding HTTP Conditional Caching](#understanding-http-conditional-caching) below.
+- **A matching `If-None-Match` returns `304` with an empty body**, checked on both `products` and `users` — the `ETag` from a normal `GET` is sent back on a second request and short-circuits it
+- **A stale or wrong `If-None-Match` returns `200`** with the full, real body, not a cached/stale one
+- **The same resource produces an identical `ETag` across independent fetches** — confirmed directly, since the whole mechanism above only works if the `ETag` is a stable fingerprint of unchanged content, not something regenerated per response
+- **A wildcard `If-None-Match: *`** (meaning "match any current representation") also returns `304`
 
 ## Understanding Mock HTTP
 
@@ -664,6 +673,18 @@ All three return a success status. None of them say "your body wasn't understood
 
 **Why this is worth having beyond DummyJSON specifically.** Both bugs share a cause: an endpoint accepting the same field (`id`) from two different sources (the URL and the body) without a single, explicit rule for which one wins when they disagree — or silently trusting the one an author didn't expect a client to send. That's a common, easy-to-introduce class of bug in any REST API with resource ids in both the path and the payload, and it's specifically invisible to a test suite that only ever sends the "obviously correct" request shape.
 
+## Understanding HTTP Conditional Caching
+
+**The mechanism, in plain terms.** An `ETag` response header is a fingerprint of a specific representation of a resource — if the content hasn't changed, the fingerprint hasn't changed. A client that's already seen a resource can send that fingerprint back on a later request via `If-None-Match`. If the server's current fingerprint still matches, it replies `304 Not Modified` with **no body at all** — "you already have the current version, nothing to send." If the content changed since, the fingerprints won't match, and the server sends `200` with the full, current body instead. The entire point is skipping the cost of re-transmitting (and re-parsing) a body the client already has.
+
+**Why this suite never had a reason to test it before now.** Every other test in this project treats each request as independent and stateless — get a resource, assert on it, move on. Conditional caching is inherently a *two-request* concern: the first response's `ETag` only means something in relation to what you send on a *second* request. Nothing else in this suite chains two requests together purely to compare headers between them (`tests/idempotency.test.js` repeats a request, but to check the *body*/status changes, not the caching header).
+
+**What testing it confirmed, cleanly.** `GET /products/1` twice in a row returns the identical `ETag` both times — proof it's a genuine content fingerprint, not something regenerated per response (a regenerated-per-response `ETag`, which some implementations get wrong, would make conditional caching silently useless — the fingerprint would never match a previous one, even for unchanged content). Sending that `ETag` back via `If-None-Match` on a follow-up request returns `304` with `data === ''`. A deliberately wrong `ETag` returns `200` with the real body. Both `products` and `users` behave identically, confirming this isn't one endpoint's special-case behavior but a real, general capability of the API.
+
+**A methodological note worth being honest about.** Verifying this by hand (via `curl`, before writing the Jest assertions) was made genuinely difficult by DummyJSON's rate limiting on this exact day — rapid, repeated manual requests kept landing on `429`s, and an early manual check briefly suggested `users`' `ETag` was *unstable* across fetches, purely because a `429` error response's own (differently-sized, differently-cached) body has its own `ETag`, and it got mixed into the comparison by accident. Slowing down and checking the status code on every single request before trusting its `ETag` resolved this. It's a small, concrete example of exactly the kind of false signal [Important Notes & Gotchas](#important-notes--gotchas) and [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience) already warn about — verify against clean, confirmed-`200` responses, not just whatever a rate-limited environment happens to hand back.
+
+**Why this is worth having beyond DummyJSON specifically.** Conditional caching is table-stakes HTTP that a surprising number of real backends implement incorrectly or not at all — a stale `ETag` that never invalidates (serving outdated data forever), one that's regenerated on every request (never actually caching anything, as feared above), or one that's simply never checked server-side (a client faithfully sends `If-None-Match` and the server ignores it, always returning `200`). Testing this directly is cheap and answers a question a response-shape assertion never touches: not just "is the data right," but "does this API's caching contract actually do what caching is for."
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -815,7 +836,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 215 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 220 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -914,7 +935,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~215 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~220 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

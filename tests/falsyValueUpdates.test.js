@@ -3,21 +3,18 @@ const { usersApi } = require('../helpers/usersApi');
 const { todosApi } = require('../helpers/todosApi');
 
 // A sequel to the expiresInMins: 0 bug in Understanding Auth Token Edge
-// Cases: a falsy value passed on purpose (null, "") doesn't behave like an
-// explicit "set it to this" the way a naive reading would expect — and,
-// verified here, that behavior isn't even consistent across resources.
-// See Understanding Falsy Value Handling on Updates.
+// Cases: does a falsy value sent on purpose (null, "") behave like an
+// explicit "set it to this," the way a naive reading would expect? See
+// Understanding Falsy Value Handling on Updates — this file previously
+// documented todos as an inconsistent exception (applying null where
+// products/users ignored it); DummyJSON has since unified null handling
+// across every resource checked. What's left is a real, more precise
+// distinction: null means "don't touch this field," but an explicit
+// empty string is treated as a genuine value to set — not the same thing.
 describe('Falsy Value Handling on Updates', () => {
-  describe('products and users silently ignore null/empty values instead of applying them', () => {
+  describe('null is uniformly treated as "field not provided" and ignored', () => {
     it('PATCH /products/1 with title: null keeps the original title', async () => {
       const res = await productsApi.patch(1, { title: null });
-
-      expect(res.status).toBe(200);
-      expect(res.data.title).toBe('Essence Mascara Lash Princess');
-    });
-
-    it('PATCH /products/1 with title: "" keeps the original title too — not just null is ignored', async () => {
-      const res = await productsApi.patch(1, { title: '' });
 
       expect(res.status).toBe(200);
       expect(res.data.title).toBe('Essence Mascara Lash Princess');
@@ -38,14 +35,21 @@ describe('Falsy Value Handling on Updates', () => {
       expect(res.data.address.postalCode).toBe('29112');
       expect(res.data.address.country).toBe('United States');
     });
-  });
 
-  describe('todos is the exception: null is actually applied, not silently ignored', () => {
-    it('PATCH /todos/1 with completed: null actually sets the field to null', async () => {
+    it('PATCH /todos/1 with completed: null also keeps the original value — no longer an exception', async () => {
       const res = await todosApi.patch(1, { completed: null });
 
       expect(res.status).toBe(200);
-      expect(res.data.completed).toBeNull();
+      expect(res.data.completed).toBe(false);
+    });
+  });
+
+  describe('an explicit empty string is a real value, not "not provided" — unlike null', () => {
+    it('PATCH /products/1 with title: "" actually sets the title to an empty string', async () => {
+      const res = await productsApi.patch(1, { title: '' });
+
+      expect(res.status).toBe(200);
+      expect(res.data.title).toBe('');
     });
   });
 });

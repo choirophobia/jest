@@ -1,5 +1,12 @@
 module.exports = {
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
+  // Generates the raw allure-results/ this project's Allure report is built
+  // from (see Understanding the Allure Report) — separate from, and
+  // alongside, the jest-html-reporters HTML below, not a replacement for it.
+  testEnvironment: 'allure-jest/node',
+  testEnvironmentOptions: {
+    resultsDir: './allure-results',
+  },
   // Jest's 5000ms default assumed a single request per test. Now that a
   // request can retry up to 3 times on a 429 (see Understanding Retry &
   // Backoff Resilience), a worst case of ~4 round trips plus backoff can

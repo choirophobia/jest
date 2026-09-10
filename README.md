@@ -32,6 +32,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check)
+- [Understanding the Allure Report](#understanding-the-allure-report)
 - [Conventions](#conventions)
 - [Important Notes & Gotchas](#important-notes--gotchas)
 - [API Testing Interview Questions & Answers](#api-testing-interview-questions--answers)
@@ -49,7 +50,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 | [Jest](https://jestjs.io/) | Test runner & assertion library |
 | [axios](https://axios-http.com/) | HTTP client for calling the DummyJSON API |
 | [zod](https://zod.dev/) | Schema/contract validation for response shapes (see below) |
-| [jest-html-reporters](https://github.com/Hazyzh/jest-html-reporters) | Generates the HTML test report published to GitHub Pages |
+| [Allure](https://allurereport.org/) | Rich, interactive test report (published to GitHub Pages) — timeline, per-test steps, history across runs |
+| [jest-html-reporters](https://github.com/Hazyzh/jest-html-reporters) | Simple, always-available local HTML report — no Java required, unlike Allure |
 | [Docker](https://www.docker.com/) | Runs the suite in a container, no local Node setup needed |
 | Node.js | Runtime |
 
@@ -110,8 +112,10 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── cartSchema.js      # Zod contract for a cart item
 │   └── postSchema.js      # Zod contract for a post item
 ├── jest.setup.js          # Registers the custom `toMatchSchema` / `toRespondWithin` matchers
-├── jest.config.js         # Points Jest at jest.setup.js, configures the HTML report, sets a 10s test timeout
-├── report/                # Generated HTML test report (gitignored, not committed)
+├── jest.config.js         # Points Jest at jest.setup.js, configures both reports, sets a 10s test timeout
+├── report/                # Generated jest-html-reporters HTML report (gitignored, not committed)
+├── allure-results/        # Raw per-test Allure result files (gitignored, not committed)
+├── allure-report/         # Generated Allure HTML report (gitignored, not committed)
 ├── Dockerfile              # Container image that runs the suite via `npm test`
 ├── .dockerignore
 ├── package.json
@@ -126,6 +130,8 @@ npm install
 ```
 
 No environment variables or API keys are needed — the suite talks directly to `https://dummyjson.com`.
+
+Running the tests themselves needs nothing beyond Node — but generating the **Allure** report locally (`npm run report:allure:generate`) requires a **Java runtime (JDK 8+)** on your machine, since Allure's report generator is a Java application under the hood. Not needed just to run `npm test`; only for that one command. CI has this covered already (see [Continuous Integration (CI)](#continuous-integration-ci)).
 
 **Or run it with Docker, no Node install needed:**
 
@@ -148,6 +154,10 @@ npx jest tests/products.test.js
 
 # Watch mode (re-runs on file changes)
 npx jest --watch
+
+# Build and open the interactive Allure report from the latest run
+npm run report:allure:generate
+npm run report:allure:open
 ```
 
 Expected result: **26 suites / 225 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
@@ -762,7 +772,7 @@ expected value to match the provided schema, but it didn't:
 
 **What's set up here — two separate workflows, two separate jobs:**
 
-- **`.github/workflows/ci.yml`** — runs on every `push` and `pull_request` targeting `main`. This is the "did this change break anything" check: install dependencies (`npm ci`), check DummyJSON is actually healthy, run `npm test`. If any test fails, the workflow fails, and that shows up as a red ✗ right on the pull request — the same signal you'd see on any real engineering team's PR checks.
+- **`.github/workflows/ci.yml`** — runs on every `push` and `pull_request` targeting `main`. This is the "did this change break anything" check: install dependencies (`npm ci`), set up Java (needed by the Allure report generator, see below), check DummyJSON is actually healthy, run `npm test`, then build and publish the Allure report. If any test fails, the workflow fails, and that shows up as a red ✗ right on the pull request — the same signal you'd see on any real engineering team's PR checks.
 - **`.github/workflows/daily-jest-tests.yml`** — runs once a day on a schedule (plus an on-demand "Run workflow" button), independent of any code change. This isn't checking *your* changes — it's checking whether the suite still passes against DummyJSON *right now*, since DummyJSON is a live external API that could change its responses or go down without anyone touching this repo. It posts a pass/fail summary to a Discord webhook, so a break gets noticed without anyone having to go look. This needs a `DISCORD_WEBHOOK_URL` secret configured in the repo settings to actually post; without it, the test run itself still works, only the notification step fails.
 - **Both workflows run the same DummyJSON health pre-check before the suite itself** — see [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check).
 
@@ -792,11 +802,28 @@ One cheap request to DummyJSON's `/test` endpoint (a trivial `{"status":"ok","me
 
 **Why this is a plain `curl` step and not a dedicated monitoring service.** Third-party options exist for this class of problem — synthetic uptime monitors, dedicated CI health-gate services — but they mean a new account, a new integration, and a new thing that can itself be misconfigured (this project already has one integration, the Discord webhook, currently broken exactly that way — see [Important Notes & Gotchas](#important-notes--gotchas)). A `curl` call reusing infrastructure this project already depends on (DummyJSON itself, its own documented rate-limit headers) needed no new account, no new secret, and no new failure mode to manage.
 
+## Understanding the Allure Report
+
+**What jest-html-reporters already did, and where it stops.** This project has had a published HTML report since early on — a single self-contained page listing every test, its status, and its duration. That's genuinely useful and stays in place (`report/index.html`, generated on every `npm test`, zero extra setup). What it doesn't do: show *trends* across runs, break a test down into its individual steps, categorize failures by severity, or give a timeline view of how long each phase of a run took relative to the others. That's the gap [Allure](https://allurereport.org/) fills — a report format widely recognized in QA specifically, not just another HTML file.
+
+**How it's wired up, mechanically.** `allure-jest` isn't a Jest *reporter* in the usual sense — it's a Jest **test environment** (`testEnvironment: 'allure-jest/node'` in `jest.config.js`), which hooks into the actual test lifecycle (each `describe`, each `it`, each assertion) rather than just reading the final results summary. That's what lets it capture a per-test **timeline** and structure, not just a pass/fail line. It writes one raw JSON file per test into `allure-results/` — nothing renders yet at this point, and nothing about running `npm test` changes; `jest-html-reporters` keeps generating `report/` in parallel, from the same test run, via the unrelated `reporters` array in the same config file. The two don't conflict: one hooks the test environment, the other reads results at the end.
+
+**Turning the raw results into the actual report is a separate, deliberate step.** `npm run report:allure:generate` runs `allure generate ./allure-results --clean -o ./allure-report` — this is where `allure-commandline` (an actual Java application, wrapped in an npm package for convenience) reads every result file and builds the interactive static site. This is *not* automatic on `npm test`, on purpose: generating the report is a distinct, occasionally-slower step from running the tests, and conflating them would mean paying that cost even for a quick local `npx jest tests/products.test.js` where nobody's going to look at a report anyway.
+
+**The one real new constraint this introduces, stated plainly.** Allure's report generator needs a **Java runtime** — this project otherwise has zero JVM dependency anywhere. Running the test suite itself (`npm test`) needs nothing beyond Node, unaffected; only `npm run report:allure:generate` needs Java, and only locally — CI has it covered explicitly via `actions/setup-java` in `ci.yml`, pinned to a specific distribution and version rather than trusting whatever JDK a given runner image happens to ship with. This is exactly the kind of trade-off this README tries to be upfront about elsewhere (see the Docker section for the same instinct, and [Important Notes & Gotchas](#important-notes--gotchas) generally) — a richer report for a real, if narrow, new local prerequisite.
+
+**Why keep both reports instead of switching entirely to Allure.** `jest-html-reporters` needs nothing but Node and produces something useful in milliseconds — that's worth preserving as the always-available option for a quick local glance, especially for a contributor who doesn't have Java installed and doesn't want to. Allure is deliberately the "richer, published" one: it's what CI builds and puts on GitHub Pages, since that's where the extra depth (timeline, steps, categorization) actually pays for itself — a permanent, shareable link is worth the one-time cost of building it properly, in a way a quick local check isn't.
+
+**What's deliberately *not* included: trend history across runs.** Allure supports carrying a `history/` directory forward between runs to show pass-rate trends, flaky-test tracking, and duration graphs over time — genuinely one of its strongest features. That requires persisting `allure-results` history across CI runs (typically: fetch the previous report's `history/` folder from the `gh-pages` branch before generating a new one, so each run's report includes everyone that came before it). This project's `ci.yml` doesn't do that yet — every published report currently reflects a single run in isolation, with no memory of previous ones. Left out deliberately to keep the initial CI change small and reviewable; the report is already fully useful without it, and the history-persistence step is a reasonable follow-up rather than something this change needed to solve at the same time.
+
 ### Live test report (GitHub Pages)
 
-Every run of `npm test` also produces a visual HTML report (`report/index.html`) — which tests passed or failed, how long each took, and the full failure message for anything that broke.
+Every run of `npm test` produces **two** reports at once, for two different purposes:
 
-`ci.yml` publishes that report to **GitHub Pages** after every push to `main`, so there's a permanent, shareable link with the current state of the suite — no need to check out the repo or run anything locally to see it. It publishes even when tests fail, so the page always reflects reality rather than only ever showing green.
+- **`report/index.html`** ([jest-html-reporters](https://github.com/Hazyzh/jest-html-reporters)) — a simple, single-file HTML report generated locally with zero extra setup. No Java, no separate build step; just open it after `npm test`.
+- **`allure-results/`** ([allure-jest](https://github.com/allure-framework/allure-js)) — raw per-test result files that get built into the full interactive **Allure** report (`npm run report:allure:generate` → `allure-report/`). See [Understanding the Allure Report](#understanding-the-allure-report) for what it adds over the simple one and why both exist side by side.
+
+`ci.yml` publishes the **Allure report** to **GitHub Pages** after every push to `main`, so there's a permanent, shareable link with the current state of the suite — no need to check out the repo or run anything locally to see it. It publishes even when tests fail, so the page always reflects reality rather than only ever showing green.
 
 (One-time setup needed: GitHub Pages must be turned on for this repo — Settings → Pages → Source: "GitHub Actions" — before the first publish will work.)
 

@@ -23,6 +23,16 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
+      # allure-commandline (used below to turn allure-results/ into the
+      # published report) wraps a Java application — pinned explicitly
+      # rather than relying on whatever JDK a given runner image happens to
+      # ship with by default. See Understanding the Allure Report.
+      - name: Setup Java (required by Allure's report generator)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
       - name: Install dependencies
         run: npm ci
 
@@ -56,15 +66,19 @@ jobs:
         run: npm test
         continue-on-error: true
 
-      # Upload the HTML report even when tests fail, so a broken suite is
-      # visible on the published page instead of freezing on the last green
-      # run — but only once the suite actually ran; skip if the health
-      # pre-check aborted first, since there's no fresh report to publish.
+      # Builds the published report from allure-results/ (produced by the
+      # allure-jest test environment in jest.config.js) even when tests
+      # failed, so a broken suite is visible on the published page instead
+      # of freezing on the last green run.
+      - name: Generate Allure report
+        if: always() && steps.health.outcome == 'success'
+        run: npm run report:allure:generate
+
       - name: Upload test report artifact
         if: always() && steps.health.outcome == 'success'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: report
+          path: allure-report
 
       - name: Fail job if tests failed
         if: steps.jest.outcome == 'failure'

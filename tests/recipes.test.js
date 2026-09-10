@@ -19,7 +19,7 @@ describe('Recipes API', () => {
       };
       const res = await recipesApi.create(payload);
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(201);
       expect(res.data).toHaveProperty('id');
       expect(typeof res.data.id).toBe('number');
       expect(res.data.name).toBe(payload.name);

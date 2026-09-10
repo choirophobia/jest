@@ -11,56 +11,40 @@ const { postsApi } = require('../helpers/postsApi');
 // call these endpoints. But a very common real-world client pattern is
 // "fetch the whole resource, mutate a field, PUT the whole object back" —
 // which means the payload naturally still has the `id` field the GET
-// response came with. Testing that path found a real, verified bug: most
-// resources 404 when the body's `id` doesn't strictly match the URL's id AS
-// A STRING — and a JSON body's id is a number, so it never can. See
-// Understanding the ID-in-Body Bug.
+// response came with. Testing that path found that DummyJSON consistently
+// lets the body's `id` — when present — decide which record is actually
+// read and returned, overriding the URL's id entirely. See Understanding
+// the ID-in-Body Bug for the full story, including an earlier version of
+// this file that documented a since-fixed inconsistency: a handful of
+// resources used to 404 on a body id that merely equalled the URL's id
+// (a strict string-vs-number comparison bug). DummyJSON has since unified
+// every resource onto the behavior this file now documents.
 describe('id Field in Request Body', () => {
-  describe('most resources 404 on a numeric body id, even when it equals the URL id', () => {
+  describe('every resource lets the body id override the URL id when both are present', () => {
     test.each([
-      ['products', () => productsApi.update(1, { id: 1, title: 'x' }), "Product with id '1' not found"],
-      [
-        'carts',
-        () => cartsApi.update(1, { id: 1, merge: false, products: [{ id: 1, quantity: 1 }] }),
-        "Cart with id '1' not found",
-      ],
-      ['recipes', () => recipesApi.update(1, { id: 1, name: 'x' }), "Recipe with id '1' not found"],
-      ['comments', () => commentsApi.update(1, { id: 1, body: 'x' }), "Comment with id '1' not found"],
-      ['todos', () => todosApi.update(1, { id: 1, completed: true }), "Todo with id '1' not found"],
-    ])('PUT /%s/1 with a matching numeric id in the body still 404s', async (_resource, makeRequest, expectedMessage) => {
+      ['products', () => productsApi.update(1, { id: 1, title: 'x' })],
+      ['carts', () => cartsApi.update(1, { id: 1, merge: false, products: [{ id: 1, quantity: 1 }] })],
+      ['recipes', () => recipesApi.update(1, { id: 1, name: 'x' })],
+      ['comments', () => commentsApi.update(1, { id: 1, body: 'x' })],
+      ['todos', () => todosApi.update(1, { id: 1, completed: true })],
+      ['users', () => usersApi.update(1, { id: 1, firstName: 'x' })],
+      ['posts', () => postsApi.update(1, { id: 1, title: 'x' })],
+    ])('PUT /%s/1 succeeds when the body id matches the URL id', async (_resource, makeRequest) => {
       const res = await makeRequest();
 
-      expect(res.status).toBe(404);
-      expect(res.data.message).toBe(expectedMessage);
-    });
-
-    it('the exact same update succeeds when id is omitted from the body (the idiomatic call)', async () => {
-      const res = await productsApi.update(1, { title: 'no-id-field' });
-
       expect(res.status).toBe(200);
-      expect(res.data.title).toBe('no-id-field');
+      expect(res.data.id).toBe(1);
     });
 
-    it('the exact same update also succeeds if id is sent as a matching STRING instead of a number', async () => {
-      const res = await productsApi.update(1, { id: '1', title: 'string-id-matches' });
-
-      expect(res.status).toBe(200);
-      expect(res.data.title).toBe('string-id-matches');
-    });
-
-    it('a genuinely different numeric id in the body 404s too, unsurprisingly', async () => {
-      const res = await productsApi.update(1, { id: 999999, title: 'x' });
-
-      expect(res.status).toBe(404);
-      expect(res.data.message).toBe("Product with id '999999' not found");
-    });
-  });
-
-  describe('users and posts are the exception: the body id, not the URL id, decides which record is affected', () => {
     test.each([
-      ['posts', () => postsApi.update(1, { id: 2, title: 'mismatch-test' })],
+      ['products', () => productsApi.update(1, { id: 2, title: 'mismatch-test' })],
+      ['carts', () => cartsApi.update(1, { id: 2, merge: false, products: [{ id: 1, quantity: 1 }] })],
+      ['recipes', () => recipesApi.update(1, { id: 2, name: 'mismatch-test' })],
+      ['comments', () => commentsApi.update(1, { id: 2, body: 'mismatch-test' })],
+      ['todos', () => todosApi.update(1, { id: 2, completed: true })],
       ['users', () => usersApi.update(1, { id: 2, firstName: 'mismatch-test' })],
-    ])('PUT /%s/1 with id:2 in the body returns record 2\'s data, not record 1\'s', async (_resource, makeRequest) => {
+      ['posts', () => postsApi.update(1, { id: 2, title: 'mismatch-test' })],
+    ])("PUT /%s/1 with id: 2 in the body returns record 2's data, not record 1's", async (_resource, makeRequest) => {
       const res = await makeRequest();
 
       expect(res.status).toBe(200);
@@ -68,13 +52,43 @@ describe('id Field in Request Body', () => {
     });
 
     test.each([
-      ['posts', () => postsApi.update(1, { id: 999999, title: 'x' }), "Post with id '999999' not found"],
+      ['products', () => productsApi.update(1, { id: 999999, title: 'x' }), "Product with id '999999' not found"],
+      [
+        'carts',
+        () => cartsApi.update(1, { id: 999999, merge: false, products: [{ id: 1, quantity: 1 }] }),
+        "Cart with id '999999' not found",
+      ],
+      ['recipes', () => recipesApi.update(1, { id: 999999, name: 'x' }), "Recipe with id '999999' not found"],
+      ['comments', () => commentsApi.update(1, { id: 999999, body: 'x' }), "Comment with id '999999' not found"],
+      ['todos', () => todosApi.update(1, { id: 999999, completed: true }), "Todo with id '999999' not found"],
       ['users', () => usersApi.update(1, { id: 999999, firstName: 'x' }), "User with id '999999' not found"],
-    ])('PUT /%s/1 with a non-existent id in the body 404s, even though the URL id is valid', async (_resource, makeRequest, expectedMessage) => {
-      const res = await makeRequest();
+      ['posts', () => postsApi.update(1, { id: 999999, title: 'x' }), "Post with id '999999' not found"],
+    ])(
+      'PUT /%s/1 with a non-existent id in the body 404s, even though the URL id is valid',
+      async (_resource, makeRequest, expectedMessage) => {
+        const res = await makeRequest();
 
-      expect(res.status).toBe(404);
-      expect(res.data.message).toBe(expectedMessage);
+        expect(res.status).toBe(404);
+        expect(res.data.message).toBe(expectedMessage);
+      }
+    );
+  });
+
+  describe('the idiomatic call (no id in the body) still works exactly as every other Update test relies on', () => {
+    it('succeeds when id is omitted from the body entirely', async () => {
+      const res = await productsApi.update(1, { title: 'no-id-field' });
+
+      expect(res.status).toBe(200);
+      expect(res.data.id).toBe(1);
+      expect(res.data.title).toBe('no-id-field');
+    });
+
+    it('succeeds if id is sent as a matching STRING instead of a number', async () => {
+      const res = await productsApi.update(1, { id: '1', title: 'string-id-matches' });
+
+      expect(res.status).toBe(200);
+      expect(res.data.id).toBe(1);
+      expect(res.data.title).toBe('string-id-matches');
     });
   });
 

@@ -13,7 +13,7 @@
   "devDependencies": {
     "allure-commandline": "^2.43.0",
     "allure-jest": "^3.12.1",
-    "jest": "^29.7.0",
+    "jest": "^30.5.1",
     "jest-html-reporters": "^3.1.7",
     "zod": "^4.4.3"
   },

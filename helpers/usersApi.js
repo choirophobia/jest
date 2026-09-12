@@ -8,7 +8,7 @@ const usersApi = {
   create: (payload, config) => apiClient.post('/users/add', payload, config),
   update: (id, payload) => apiClient.put(`/users/${id}`, payload),
   patch: (id, payload) => apiClient.patch(`/users/${id}`, payload),
-  remove: (id) => apiClient.delete(`/users/${id}`),
+  remove: (id, config) => apiClient.delete(`/users/${id}`, config),
 };
 
 module.exports = { usersApi };

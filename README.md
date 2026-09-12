@@ -29,6 +29,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding the ID-in-Body Bug](#understanding-the-id-in-body-bug)
 - [Understanding HTTP Conditional Caching](#understanding-http-conditional-caching)
 - [Understanding Falsy Value Handling on Updates](#understanding-falsy-value-handling-on-updates)
+- [Understanding No Authentication Required for Writes](#understanding-no-authentication-required-for-writes)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check)
@@ -85,7 +86,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── httpRequestSemantics.test.js # Malformed requests, not responses — wrong Content-Type, duplicate query params
 │   ├── idFieldInRequestBody.test.js # A body id, when present, always wins over the URL id — across every resource
 │   ├── conditionalCaching.test.js # ETag / If-None-Match — 304 on a match, 200 on a stale/wrong one
-│   └── falsyValueUpdates.test.js # null is uniformly ignored on update; an explicit "" is applied — not the same thing
+│   ├── falsyValueUpdates.test.js # null is uniformly ignored on update; an explicit "" is applied — not the same thing
+│   └── noAuthRequiredForWrites.test.js # Every write succeeds unauthenticated — even with a garbage Bearer token
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -160,7 +162,7 @@ npm run report:allure:generate
 npm run report:allure:open
 ```
 
-Expected result: **26 suites / 236 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **27 suites / 243 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -396,6 +398,12 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Not a resource — a follow-up to `expiresInMins: 0` in Understanding Auth Token Edge Cases.** See [Understanding Falsy Value Handling on Updates](#understanding-falsy-value-handling-on-updates) below.
 - **`null` is uniformly ignored:** `PATCH` with `title: null` or `price: null` on `products`, a nested `address.city: null` on `users` (sibling nested fields still deep-merge correctly around it), and `completed: null` on `todos` all leave the original value untouched — every resource checked treats `null` as "field not provided," not "set it to this"
 - **An explicit empty string is different:** `PATCH /products/1` with `title: ""` *does* set the title to an empty string — a real, deliberate distinction between "omitted" (`null`) and "a genuine, if empty, value" (`""`), not just inconsistent falsy handling
+
+### No Authentication Required for Writes (`tests/noAuthRequiredForWrites.test.js`)
+- **Not a resource — an implicit fact this entire suite already relied on, made explicit.** See [Understanding No Authentication Required for Writes](#understanding-no-authentication-required-for-writes) below.
+- **Every write endpoint checked succeeds with no `Authorization` header at all:** `POST /products/add`, `PUT /products/1`, `DELETE /products/1`, `PATCH /carts/1` — none of them require a token
+- **A garbage `Bearer` token doesn't get rejected either** — `PUT /products/1` and `DELETE /users/1` both succeed even when sent an explicitly invalid token, confirming auth isn't just optional, it's never checked at all on these routes
+- **Contrast: `GET /auth/me` still correctly returns `401`** with no token — the one route in this whole suite that actually validates authentication, unlike every write endpoint above
 
 ## Understanding Mock HTTP
 
@@ -714,6 +722,16 @@ All three return a success status. None of them say "your body wasn't understood
 
 **Why this is worth having beyond DummyJSON specifically.** `value || default` and `if (value) update()` are extremely common patterns in real backend code, and both would treat `null` and `""` identically — unlike what's actually being tested here. Knowing precisely which falsy values a field-update endpoint treats as "not provided" versus "a real value" is cheap to verify explicitly and easy to get wrong silently; discovering the wrong version in production is a support ticket that starts with "I cleared this field and it didn't save," the same failure mode as the `expiresInMins: 0` bug, in a place a lot more real systems actually have this exact field-update pattern.
 
+## Understanding No Authentication Required for Writes
+
+**Something this whole suite has always relied on, without ever saying so.** From the very first test file, every `create`/`update`/`patch`/`remove` call in this project has been made without attaching a token — `helpers/apiClient.js` never adds one by default, and no write test anywhere has ever called `authApi.login()` first. That's been true implicitly for the entire suite; this file is the first place it's actually *asserted* rather than just assumed to be fine. The distinction matters: "every test happens to pass without auth" and "auth is deliberately not required, and that's been verified" are different claims, and only the second one is something you can put in front of an interviewer with confidence.
+
+**What testing it explicitly found, beyond the obvious.** Confirming a write succeeds with *no* `Authorization` header only proves auth is optional — it doesn't prove auth is never *checked*. A route could reasonably accept an anonymous request while still rejecting a request that supplies a bad credential (many real systems treat "no attempt to authenticate" and "a failed attempt to authenticate" differently, on purpose). So this file goes one step further: `PUT /products/1` and `DELETE /users/1` both succeed even with an explicitly garbage `Bearer` token attached. Nothing about the token — present, absent, or nonsense — changes the outcome. That's a stronger, more specific claim than "auth is optional": it's that these routes have **no authentication check in their code path at all**.
+
+**Why the `GET /auth/me` contrast is the point, not an afterthought.** Testing "writes don't require auth" in isolation risks implying this API has no authentication anywhere, which is false and would be a weaker, less precise finding. `auth.test.js` already established that `/auth/me` correctly returns `401` with no token and with an invalid one (see [Understanding Auth Token Edge Cases](#understanding-auth-token-edge-cases)). Putting that fact directly alongside "the exact same kind of request succeeds unauthenticated on every write endpoint" is what turns this from "DummyJSON has no auth" into the more accurate and more interesting claim: **this API has authentication, and it's deliberately scoped to exactly one route** (`/auth/me`, the "who am I" check), while every resource mutation is open to anyone.
+
+**Why this is worth having beyond DummyJSON specifically.** On a real API, this exact shape — a working login system whose issued tokens are never actually checked on the endpoints that matter — is a critical vulnerability, not a curiosity: anyone can modify or delete any resource without ever authenticating, while the login flow itself creates a false impression that access is controlled. On DummyJSON, a public sandbox with simulated, non-persistent writes (see [Overview](#overview)), this is a reasonable, deliberate design choice rather than a bug — but recognizing the difference between "this is fine because the writes aren't real" and "this is fine, full stop" is exactly the judgment call a portfolio project should be able to demonstrate having made on purpose, not by accident.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -882,7 +900,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 236 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 243 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -981,7 +999,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~236 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~243 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

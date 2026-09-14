@@ -30,6 +30,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding HTTP Conditional Caching](#understanding-http-conditional-caching)
 - [Understanding Falsy Value Handling on Updates](#understanding-falsy-value-handling-on-updates)
 - [Understanding No Authentication Required for Writes](#understanding-no-authentication-required-for-writes)
+- [Understanding Sensitive Data Exposure](#understanding-sensitive-data-exposure)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check)
@@ -87,7 +88,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── idFieldInRequestBody.test.js # A body id, when present, always wins over the URL id — across every resource
 │   ├── conditionalCaching.test.js # ETag / If-None-Match — 304 on a match, 200 on a stale/wrong one
 │   ├── falsyValueUpdates.test.js # null is uniformly ignored on update; an explicit "" is applied — not the same thing
-│   └── noAuthRequiredForWrites.test.js # Every write succeeds unauthenticated — even with a garbage Bearer token
+│   ├── noAuthRequiredForWrites.test.js # Every write succeeds unauthenticated — even with a garbage Bearer token
+│   └── sensitiveDataExposure.test.js # GET /users exposes plaintext passwords, SSNs, full card numbers — documented, not fixed
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -162,7 +164,7 @@ npm run report:allure:generate
 npm run report:allure:open
 ```
 
-Expected result: **27 suites / 243 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **28 suites / 248 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -404,6 +406,12 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **Every write endpoint checked succeeds with no `Authorization` header at all:** `POST /products/add`, `PUT /products/1`, `DELETE /products/1`, `PATCH /carts/1` — none of them require a token
 - **A garbage `Bearer` token doesn't get rejected either** — `PUT /products/1` and `DELETE /users/1` both succeed even when sent an explicitly invalid token, confirming auth isn't just optional, it's never checked at all on these routes
 - **Contrast: `GET /auth/me` still correctly returns `401`** with no token — the one route in this whole suite that actually validates authentication, unlike every write endpoint above
+
+### Sensitive Data Exposure (`tests/sensitiveDataExposure.test.js`)
+- **Not a resource — a deliberate security-awareness check, not a bug report.** See [Understanding Sensitive Data Exposure](#understanding-sensitive-data-exposure) below.
+- **`GET /users/{id}` returns a plaintext `password`, a government ID (`ssn`), and an `ein`** — personal identifiers a real API would never return this way
+- **The same response also includes a full, unmasked bank card number and a crypto wallet address** — financial data a real API would mask (last 4 digits) or omit entirely
+- **Not a single-lookup fluke:** `GET /users` (a bulk list) exposes the same fields for every item on the page, not just single-record fetches
 
 ## Understanding Mock HTTP
 
@@ -732,6 +740,18 @@ All three return a success status. None of them say "your body wasn't understood
 
 **Why this is worth having beyond DummyJSON specifically.** On a real API, this exact shape — a working login system whose issued tokens are never actually checked on the endpoints that matter — is a critical vulnerability, not a curiosity: anyone can modify or delete any resource without ever authenticating, while the login flow itself creates a false impression that access is controlled. On DummyJSON, a public sandbox with simulated, non-persistent writes (see [Overview](#overview)), this is a reasonable, deliberate design choice rather than a bug — but recognizing the difference between "this is fine because the writes aren't real" and "this is fine, full stop" is exactly the judgment call a portfolio project should be able to demonstrate having made on purpose, not by accident.
 
+## Understanding Sensitive Data Exposure
+
+**This isn't a bug report — DummyJSON is a fixed, external service this project can't patch — it's a named finding.** [Understanding Contract Drift Detection](#understanding-contract-drift-detection) already tells the story of how `schemas/userSchema.js` came to declare `password`, `ip`, `macAddress`, `ein`, `ssn`, `userAgent`, and `crypto` as real fields: they were missing from the schema, found by curling the live API, and added to keep the schema accurate. That earlier work fixed a *schema completeness* problem. This file asks a different question about those same fields: **should an API return them like this at all?** OWASP's API Security Top 10 has a name for exactly this — "Excessive Data Exposure" — an endpoint that hands back more sensitive data than the caller has any legitimate reason to receive, usually because it's convenient to just serialize the whole internal object rather than deliberately choosing what a client actually needs.
+
+**What's actually being returned, concretely.** `GET /users/{id}` — and, confirmed here, `GET /users` for every item in a bulk list, not just single lookups — includes a plaintext `password` (not hashed, not redacted), a government identification number (`ssn`), an `ein`, a complete, unmasked bank card number, and a crypto wallet address. None of this is behind a permission check or a "you can only see your own" restriction — see [Understanding No Authentication Required for Writes](#understanding-no-authentication-required-for-writes) for the closely related finding that these read endpoints (like the write ones) need no authentication at all. Put the two findings together and the honest summary is: **anyone, unauthenticated, can read any user's plaintext password, SSN, and full card number, for every user in the system, with a single unauthenticated request.**
+
+**Why this is worth testing explicitly instead of just noting it in passing.** A schema that happily validates `password: z.string()` looks, at a glance, like normal, unremarkable API surface — nothing about a passing `toMatchSchema()` check flags "and by the way, this field probably shouldn't be here." Writing a dedicated test that asserts these fields are present does something a passive schema never does: it forces a reader of this suite to consciously notice the exposure, rather than let it blend into the background as just another validated field alongside `firstName` and `email`.
+
+**What a real API should do differently, concretely.** Field-level response filtering scoped to the caller's actual permissions (a public profile endpoint returns `firstName`/`username`/`image`; only the account owner, authenticated, ever sees anything resembling `ssn` or `bank`); masking rather than omitting where a masked form is still useful (`cardNumber: "**** **** **** 5044"` instead of the full number, which is the industry-standard pattern for exactly this reason); and never returning a plaintext password under any circumstance, full stop — a real backend should not have a plaintext password to return in the first place, only a hash it never serializes back out.
+
+**Why this is worth having beyond DummyJSON specifically.** This is precisely the failure mode "Excessive Data Exposure" describes in production systems that aren't a sandbox: an endpoint built for one internal use case (an admin dashboard, say) gets reused by a public-facing client without anyone re-checking which fields actually need to leave the server, and the full internal record — hashed-or-not passwords, tax IDs, payment details — goes out over the wire because nobody wrote the filtering step. Knowing to test for this, on any API, is a materially different skill than testing that a response merely matches its documented shape.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -900,7 +920,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 243 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 248 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -999,7 +1019,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~243 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~248 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

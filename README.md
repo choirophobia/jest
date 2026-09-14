@@ -31,6 +31,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding Falsy Value Handling on Updates](#understanding-falsy-value-handling-on-updates)
 - [Understanding No Authentication Required for Writes](#understanding-no-authentication-required-for-writes)
 - [Understanding Sensitive Data Exposure](#understanding-sensitive-data-exposure)
+- [Understanding Mass Assignment](#understanding-mass-assignment)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check)
@@ -89,7 +90,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── conditionalCaching.test.js # ETag / If-None-Match — 304 on a match, 200 on a stale/wrong one
 │   ├── falsyValueUpdates.test.js # null is uniformly ignored on update; an explicit "" is applied — not the same thing
 │   ├── noAuthRequiredForWrites.test.js # Every write succeeds unauthenticated — even with a garbage Bearer token
-│   └── sensitiveDataExposure.test.js # GET /users exposes plaintext passwords, SSNs, full card numbers — documented, not fixed
+│   ├── sensitiveDataExposure.test.js # GET /users exposes plaintext passwords, SSNs, full card numbers — documented, not fixed
+│   └── massAssignment.test.js # products correctly allowlists fields; users lets role be set directly — a real gap
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -164,7 +166,7 @@ npm run report:allure:generate
 npm run report:allure:open
 ```
 
-Expected result: **28 suites / 248 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **29 suites / 253 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -412,6 +414,12 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **`GET /users/{id}` returns a plaintext `password`, a government ID (`ssn`), and an `ein`** — personal identifiers a real API would never return this way
 - **The same response also includes a full, unmasked bank card number and a crypto wallet address** — financial data a real API would mask (last 4 digits) or omit entirely
 - **Not a single-lookup fluke:** `GET /users` (a bulk list) exposes the same fields for every item on the page, not just single-record fetches
+
+### Mass Assignment (`tests/massAssignment.test.js`)
+- **Not a resource — a mixed finding, unlike most of this suite's security-adjacent tests.** See [Understanding Mass Assignment](#understanding-mass-assignment) below.
+- **`products/add` gets this right:** injecting `isAdmin: true` or `role: 'admin'` into the create payload — fields entirely outside its schema — are silently stripped, never present in the response
+- **`users/add` mostly does the same, with one real exception: `role`.** A genuinely unrecognized field (`isAdmin`) is stripped just like on `products`, and `role` defaults to `"user"` when omitted — but explicitly sending `role: 'admin'` at creation is accepted and echoed back as `"admin"`, no allowlist or validation stops it
+- **The same gap exists on update, not just create:** `PATCH /users/1` with `role: 'superadmin'` — not even a real role in the system — is accepted without any enum validation at all
 
 ## Understanding Mock HTTP
 
@@ -752,6 +760,16 @@ All three return a success status. None of them say "your body wasn't understood
 
 **Why this is worth having beyond DummyJSON specifically.** This is precisely the failure mode "Excessive Data Exposure" describes in production systems that aren't a sandbox: an endpoint built for one internal use case (an admin dashboard, say) gets reused by a public-facing client without anyone re-checking which fields actually need to leave the server, and the full internal record — hashed-or-not passwords, tax IDs, payment details — goes out over the wire because nobody wrote the filtering step. Knowing to test for this, on any API, is a materially different skill than testing that a response merely matches its documented shape.
 
+## Understanding Mass Assignment
+
+**The concept, stated plainly.** Mass assignment (also called "over-posting") is what happens when an endpoint takes a client's entire payload and applies it to a record without deliberately choosing which fields the client is actually allowed to set. It's a well-known OWASP concern precisely because the failure is invisible in the happy path: a normal signup form sending `{ firstName, email, password }` works exactly the same whether the server allowlists those three fields or blindly assigns whatever object it received — the difference only shows up when someone deliberately sends a field they shouldn't be able to control.
+
+**Why this finding is a genuine mix, not a pile-on.** Most of the security-adjacent tests elsewhere in this suite ([Understanding No Authentication Required for Writes](#understanding-no-authentication-required-for-writes), [Understanding Sensitive Data Exposure](#understanding-sensitive-data-exposure)) are entirely negative findings. This one isn't: `POST /products/add` was tested with exactly the same kind of injected payload (`isAdmin: true`, `role: 'admin'`, fields with no business being there) and correctly stripped both — proof this API *is* capable of allowlisting fields properly, at least somewhere. `POST /users/add` does the same for a genuinely made-up field like `isAdmin`. The gap is narrow and specific: `role` — a real field, with a real, sensible default (`"user"`) — can simply be set to `"admin"` by anyone creating an account, or overwritten on an existing user via a plain `PATCH`, to a string that isn't even a real role (`"superadmin"` succeeds with no enum check at all).
+
+**Why a narrow, specific gap is more useful to find than a blanket one.** "This API has no input validation anywhere" would be a less credible, less actionable finding than "this API validates most things correctly, and specifically fails to protect one privilege-bearing field." The narrow version is exactly the shape real mass-assignment vulnerabilities take in production: a team correctly locks down most of a create endpoint, then adds a new field (`role`, `isVerified`, `creditLimit`) later without remembering to add it to the same allowlist — the kind of gap that survives code review because everything *around* it looks properly guarded.
+
+**Why this is worth having beyond DummyJSON specifically.** Combined with [Understanding No Authentication Required for Writes](#understanding-no-authentication-required-for-writes) — no token is needed to call `POST /users/add` or `PATCH /users/1` in the first place — the full, honest picture is: anyone, unauthenticated, can create an account with `role: "admin"` already set, or promote an existing account to any string they like, in one request. On a real system where `role` gates actual permissions, that's a full authorization bypass reachable through the signup form. The general lesson generalizes past `role`: any field representing a permission, quota, or trust level (`isVerified`, `creditLimit`, `accountTier`) needs the exact same explicit allowlisting this project's own `products/add` already demonstrates is achievable — the fix isn't exotic, it's just consistency.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -920,7 +938,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 248 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 253 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -1019,7 +1037,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~248 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~253 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 

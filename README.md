@@ -855,6 +855,32 @@ expected value to match the provided schema, but it didn't:
 
 **Why this matters for a portfolio project specifically.** Tests that only run when a human remembers to run them locally are much weaker than tests that run automatically — CI is what turns "I wrote tests" into "these tests are actually enforced." It's also one of the fastest, lowest-effort things to point to in an interview: a green checkmark on a PR is a concrete, verifiable signal that doesn't require anyone to trust a claim.
 
+### Live test report (GitHub Pages)
+
+Every run of `npm test` produces **two** reports at once, for two different purposes:
+
+- **`report/index.html`** ([jest-html-reporters](https://github.com/Hazyzh/jest-html-reporters)) — a simple, single-file HTML report generated locally with zero extra setup. No Java, no separate build step; just open it after `npm test`.
+- **`allure-results/`** ([allure-jest](https://github.com/allure-framework/allure-js)) — raw per-test result files that get built into the full interactive **Allure** report (`npm run report:allure:generate` → `allure-report/`). See [Understanding the Allure Report](#understanding-the-allure-report) for what it adds over the simple one and why both exist side by side.
+
+`ci.yml` publishes the **Allure report** to **GitHub Pages** after every push to `main`, so there's a permanent, shareable link with the current state of the suite — no need to check out the repo or run anything locally to see it: **https://choirophobia.github.io/jest/**. It publishes even when tests fail, so the page always reflects reality rather than only ever showing green.
+
+(GitHub Pages is already enabled for this repo — Settings → Pages → Source: "GitHub Actions" — and confirmed publishing correctly. A fresh fork needs that same one-time step done once before its own first publish will work; until then, the "Publish Test Report to GitHub Pages" job fails with a `404` from `actions/deploy-pages` even though the tests themselves passed — a real failure this project hit once, not a hypothetical.)
+
+### Docker
+
+The `Dockerfile` packages the suite into a container: `npm ci` at build time, `npm test` as the default command. This means anyone can run the full suite with two commands and no local Node/npm install at all:
+
+```bash
+docker build -t dummyjson-api-tests .
+docker run --rm dummyjson-api-tests
+```
+
+It still makes real network calls out to `https://dummyjson.com` — the container just packages the *runner*, not a fake/offline API.
+
+### Dependabot
+
+`.github/dependabot.yml` checks weekly for outdated or vulnerable dependencies — `npm` packages, the GitHub Actions used in the workflows, and the Docker base image — and opens a pull request automatically for each one it finds. No code to write or maintain; it's a config file that turns on a feature GitHub already provides.
+
 ## Understanding the CI Health Pre-check
 
 **The real, lived problem this solves.** This exact project has hit DummyJSON's rate limit repeatedly and visibly during its own development — locally, in CI, and while verifying several of the features documented above (see [Understanding Retry & Backoff Resilience](#understanding-retry--backoff-resilience) and [Important Notes & Gotchas](#important-notes--gotchas)). The failure mode is always the same shape: the full suite fires ~200+ requests, some fraction of them land on an already-exhausted rate-limit window, and the run finishes several minutes later with a handful of confusing, scattered `429` failures — different test each time, no single obvious cause in the log. Someone has to read *several* failures and recognize the `429` pattern themselves before they understand what actually happened.
@@ -891,32 +917,6 @@ One cheap request to DummyJSON's `/test` endpoint (a trivial `{"status":"ok","me
 
 **What's deliberately *not* included: trend history across runs.** Allure supports carrying a `history/` directory forward between runs to show pass-rate trends, flaky-test tracking, and duration graphs over time — genuinely one of its strongest features. That requires persisting `allure-results` history across CI runs (typically: fetch the previous report's `history/` folder from the `gh-pages` branch before generating a new one, so each run's report includes everyone that came before it). This project's `ci.yml` doesn't do that yet — every published report currently reflects a single run in isolation, with no memory of previous ones. Left out deliberately to keep the initial CI change small and reviewable; the report is already fully useful without it, and the history-persistence step is a reasonable follow-up rather than something this change needed to solve at the same time.
 
-### Live test report (GitHub Pages)
-
-Every run of `npm test` produces **two** reports at once, for two different purposes:
-
-- **`report/index.html`** ([jest-html-reporters](https://github.com/Hazyzh/jest-html-reporters)) — a simple, single-file HTML report generated locally with zero extra setup. No Java, no separate build step; just open it after `npm test`.
-- **`allure-results/`** ([allure-jest](https://github.com/allure-framework/allure-js)) — raw per-test result files that get built into the full interactive **Allure** report (`npm run report:allure:generate` → `allure-report/`). See [Understanding the Allure Report](#understanding-the-allure-report) for what it adds over the simple one and why both exist side by side.
-
-`ci.yml` publishes the **Allure report** to **GitHub Pages** after every push to `main`, so there's a permanent, shareable link with the current state of the suite — no need to check out the repo or run anything locally to see it. It publishes even when tests fail, so the page always reflects reality rather than only ever showing green.
-
-(One-time setup needed: GitHub Pages must be turned on for this repo — Settings → Pages → Source: "GitHub Actions" — before the first publish will work.)
-
-### Docker
-
-The `Dockerfile` packages the suite into a container: `npm ci` at build time, `npm test` as the default command. This means anyone can run the full suite with two commands and no local Node/npm install at all:
-
-```bash
-docker build -t dummyjson-api-tests .
-docker run --rm dummyjson-api-tests
-```
-
-It still makes real network calls out to `https://dummyjson.com` — the container just packages the *runner*, not a fake/offline API.
-
-### Dependabot
-
-`.github/dependabot.yml` checks weekly for outdated or vulnerable dependencies — `npm` packages, the GitHub Actions used in the workflows, and the Docker base image — and opens a pull request automatically for each one it finds. No code to write or maintain; it's a config file that turns on a feature GitHub already provides.
-
 ## Conventions
 
 - **One file per resource**, grouped into `Create` / `Read` / `Update` / `Delete` / `negative cases` describe blocks — except read-only resources (`quotes`), which only have `Read` / `negative cases`, and the `mockHttp`/`tools` utility files, which are grouped by scenario/tool instead of CRUD since they don't model a data entity.
@@ -926,7 +926,7 @@ It still makes real network calls out to `https://dummyjson.com` — the contain
   - `res.status` matching the expected HTTP status
   - Key fields present/correct in `res.data` — via a `schemas/*Schema.js` + `toMatchSchema()` for Products/Users/Carts/Posts (see [Schema Validation with Zod](#schema-validation-with-zod)), via manual per-field `expect()` calls for the rest
   - For writes, that the echoed response reflects the payload sent (not that it was actually saved)
-- **Every resource has at least one negative test:** invalid/out-of-range ID, missing required field, or invalid auth. For the seven full-CRUD resources, the get/update/delete-non-existent-id trio is written once as a `test.each` table rather than three copy-pasted `it()` blocks — see [Parameterized Tests with test.each](#parameterized-tests-with-testeach).
+- **Every resource has at least one negative test:** invalid/out-of-range ID, missing required field, or invalid auth. For the seven full-CRUD resources, the get/update/delete-non-existent-id trio is written once as a `test.each` table (`tests/products.test.js`'s `negative cases` block is the reference example) rather than three copy-pasted `it()` blocks — the same `test.each` pattern shows up repeatedly across this suite wherever a check needs repeating across several resources or inputs (see [Understanding the ID-in-Body Bug](#understanding-the-id-in-body-bug) and [Understanding Malformed ID Path Parameters](#understanding-malformed-id-path-parameters) for two of the larger examples).
 - **Tests are independent of each other and order-agnostic — except `tests/userJourney.test.js`,** which is a deliberately ordered, stateful scenario chain. See [Scenario Tests: Beyond Isolated CRUD](#scenario-tests-beyond-isolated-crud) for why that one file is the exception.
 
 ## Important Notes & Gotchas

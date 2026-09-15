@@ -32,6 +32,7 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 - [Understanding No Authentication Required for Writes](#understanding-no-authentication-required-for-writes)
 - [Understanding Sensitive Data Exposure](#understanding-sensitive-data-exposure)
 - [Understanding Mass Assignment](#understanding-mass-assignment)
+- [Understanding No Value Validation on Write](#understanding-no-value-validation-on-write)
 - [Schema Validation with Zod](#schema-validation-with-zod)
 - [Continuous Integration (CI)](#continuous-integration-ci)
 - [Understanding the CI Health Pre-check](#understanding-the-ci-health-pre-check)
@@ -91,7 +92,8 @@ An end-to-end API test suite built with **Jest** and **axios** against the publi
 │   ├── falsyValueUpdates.test.js # null is uniformly ignored on update; an explicit "" is applied — not the same thing
 │   ├── noAuthRequiredForWrites.test.js # Every write succeeds unauthenticated — even with a garbage Bearer token
 │   ├── sensitiveDataExposure.test.js # GET /users exposes plaintext passwords, SSNs, full card numbers — documented, not fixed
-│   └── massAssignment.test.js # products correctly allowlists fields; users lets role be set directly — a real gap
+│   ├── massAssignment.test.js # products correctly allowlists fields; users lets role be set directly — a real gap
+│   └── writeValueValidation.test.js # Scalar fields accept any value/type unchecked; array fields are the exception
 ├── .github/
 │   ├── dependabot.yml      # Weekly automated PRs for outdated/vulnerable dependencies
 │   └── workflows/
@@ -166,7 +168,7 @@ npm run report:allure:generate
 npm run report:allure:open
 ```
 
-Expected result: **29 suites / 253 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+Expected result: **30 suites / 259 tests, all passing**, run live against the real API (no internet access = failures, since there's nothing to mock). `npm run test:smoke` runs a 9-test subset in a couple of seconds — see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ## How the Suite Is Organized
 
@@ -420,6 +422,11 @@ Three unrelated utility APIs, grouped in one file since none of them model a CRU
 - **`products/add` gets this right:** injecting `isAdmin: true` or `role: 'admin'` into the create payload — fields entirely outside its schema — are silently stripped, never present in the response
 - **`users/add` mostly does the same, with one real exception: `role`.** A genuinely unrecognized field (`isAdmin`) is stripped just like on `products`, and `role` defaults to `"user"` when omitted — but explicitly sending `role: 'admin'` at creation is accepted and echoed back as `"admin"`, no allowlist or validation stops it
 - **The same gap exists on update, not just create:** `PATCH /users/1` with `role: 'superadmin'` — not even a real role in the system — is accepted without any enum validation at all
+
+### No Value Validation on Write (`tests/writeValueValidation.test.js`)
+- **Not a resource — checks whether a *recognized* field's value is validated at all, distinct from Mass Assignment (unrecognized fields) and Falsy Value Handling (`null`/`""` specifically).** See [Understanding No Value Validation on Write](#understanding-no-value-validation-on-write) below.
+- **Scalar fields accept anything:** `POST /products/add` accepts a negative `price` (`-500`), a `rating` of `999` (the documented range is `0`-`5`), `price` as a string (`"50"`) or even an object (`{ amount: 50 }`) instead of a number — unconverted, unrejected — and a `title` 5,000 characters long with no length limit
+- **Array-typed fields are the exception:** `tags` sent as a string instead of an array is silently dropped from the response entirely, rather than accepted as-is like every scalar field above — proof the API *can* type-check, just not for scalars
 
 ## Understanding Mock HTTP
 
@@ -770,6 +777,16 @@ All three return a success status. None of them say "your body wasn't understood
 
 **Why this is worth having beyond DummyJSON specifically.** Combined with [Understanding No Authentication Required for Writes](#understanding-no-authentication-required-for-writes) — no token is needed to call `POST /users/add` or `PATCH /users/1` in the first place — the full, honest picture is: anyone, unauthenticated, can create an account with `role: "admin"` already set, or promote an existing account to any string they like, in one request. On a real system where `role` gates actual permissions, that's a full authorization bypass reachable through the signup form. The general lesson generalizes past `role`: any field representing a permission, quota, or trust level (`isVerified`, `creditLimit`, `accountTier`) needs the exact same explicit allowlisting this project's own `products/add` already demonstrates is achievable — the fix isn't exotic, it's just consistency.
 
+## Understanding No Value Validation on Write
+
+**A different question than the other write-side findings in this suite.** [Understanding Mass Assignment](#understanding-mass-assignment) asks "can a client set a field it shouldn't control?" — a question about *which fields* get through. [Understanding Falsy Value Handling on Updates](#understanding-falsy-value-handling-on-updates) asks whether `null`/`""` specifically get applied or ignored. This file asks a third, different question: for a field the API clearly does recognize and store, **is the value itself checked at all** — its type, its range, its plausibility?
+
+**What testing it found: scalar fields accept anything.** `POST /products/add` accepts `price: -500` (a negative price) and stores it as-is. It accepts `rating: 999`, wildly outside the `0`-`5` range `schemas/productSchema.js` documents as the real shape every other product in the system actually has (see [Schema Validation with Zod](#schema-validation-with-zod)). It accepts `price` as a string (`"50"`) or even a nested object (`{ amount: 50 }`) in place of a number, storing and echoing back whatever type was sent, uncoerced and unrejected. And it accepts a `title` five thousand characters long with no length limit at all. None of these are edge-case formats a schema library would need special handling for — they're the kind of input a `Joi`/`zod`/`class-validator` schema on the server would reject in a single line each, and none of that line exists here.
+
+**Why `tags` breaks the pattern, and why that's the interesting part.** Sending `tags: 'not-an-array'` — a string where the field is normally an array — doesn't get stored as a malformed string; the field is dropped from the response entirely, as if it had never been sent. That's meaningfully different from every scalar case above, where the wrong type is *kept*. The likely reason: code that's going to iterate an array (`tags.map(...)`, `tags.forEach(...)`) needs to guard against a non-array or it crashes outright, so *some* defensive check exists for that specific case — not out of a general commitment to input validation, but because leaving it unchecked would break something else immediately. Scalar fields never get passed to anything that would crash on the wrong type, so nothing ever forced a check to be written.
+
+**Why this is worth having beyond DummyJSON specifically.** "No input validation" and "no input validation, except for the one case that happens to crash something if you don't" are different findings, and the second one is closer to how real systems actually end up under-validated: not from a deliberate decision to skip validation everywhere, but because validation gets added reactively, wherever an unhandled type actually caused a visible bug, and nowhere else. A negative price or an out-of-range rating doesn't crash anything, so nothing ever forced someone to reject it — right up until it reaches a downstream system (an invoice generator, a search facet, a rating average) that assumes the constraint always held.
+
 ## Schema Validation with Zod
 
 **The problem this solves.** Before this, checking a response's shape looked like this (from the old `products.test.js`):
@@ -938,7 +955,7 @@ Ten questions an interviewer is likely to ask about API testing specifically —
 | **Failure localization** | Precise — one endpoint, one assertion | Fuzzy — a UI failure could be the API, the JS, or the DOM |
 | **Where it sits in the pyramid** | Middle layer — more coverage per test than UI, more realistic than a unit test | Top layer — fewest tests, highest confidence in the actual user experience |
 
-**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 253 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
+**Example from this project:** this entire suite is API-only — there's no browser involved anywhere. `tests/products.test.js` asserts directly on `res.status` and `res.data`, not on anything rendered. That's *why* it can run all 259 tests in under a minute against a live external service — a UI suite covering the same ground would take dramatically longer and be far more prone to unrelated failures.
 
 ### 2. What's the difference between unit, integration, and end-to-end (E2E) API tests?
 
@@ -1037,7 +1054,7 @@ it('accesses a protected route', async () => {
 | **When it runs** | On every push, or while iterating locally | Pre-merge, nightly, or on demand |
 | **What a failure means** | Stop immediately — something fundamental is broken | Investigate — a specific behavior regressed |
 
-**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~253 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
+**Example from this project:** `npm run test:smoke` runs 9 tests (one core read per resource, plus login) in about 2 seconds, versus the full suite's ~259 tests in roughly a minute. Critically, the smoke subset **tags existing tests** rather than duplicating them into a separate file — seeing why that distinction matters (and not just "add more tests") is itself a good interview signal; see [Understanding Smoke Test Tagging](#understanding-smoke-test-tagging).
 
 ### 9. Why test response headers, not just the status code and body?
 
